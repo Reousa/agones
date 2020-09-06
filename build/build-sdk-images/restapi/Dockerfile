@@ -20,19 +20,19 @@ RUN apt-get update && \
 
 # install go
 WORKDIR /usr/local
-ENV GO_VERSION=1.13.5
+ENV GO_VERSION=1.14.4
 ENV GO111MODULE=on
 ENV GOPATH /go
 RUN wget -q https://dl.google.com/go/go${GO_VERSION}.linux-amd64.tar.gz && \
     tar -xzf go${GO_VERSION}.linux-amd64.tar.gz && rm go${GO_VERSION}.linux-amd64.tar.gz && mkdir -p ${GOPATH}
 
-RUN curl -sL https://deb.nodesource.com/setup_11.x | bash - && \
-    apt-get install -y nodejs
+RUN echo '§' && apt-get -qy update 
+RUN curl -sL https://deb.nodesource.com/setup_12.x | bash - && \
+    apt-get install -qq -y nodejs
 
-RUN  apt-get install -y openjdk-8-jre
+RUN apt-get install -qq -y openjdk-11-jre > /dev/null
 
 ENV PATH /usr/local/go/bin:/go/bin:$PATH
-
 
 # code generation scripts
 COPY *.sh /root/

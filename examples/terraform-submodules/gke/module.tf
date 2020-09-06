@@ -14,7 +14,15 @@
 
 
 // Run:
-//  terraform apply -var project="<YOUR_GCP_ProjectID>" [-var agones_version="1.1.0"]
+//  terraform apply -var project="<YOUR_GCP_ProjectID>" [-var agones_version="1.8.0"]
+
+provider "google" {
+  version = "~> 2.10"
+}
+
+provider "google-beta" {
+  version = "~> 2.10"
+}
 
 variable "project" {
   default = ""
@@ -26,7 +34,7 @@ variable "name" {
 
 // Install latest version of agones
 variable "agones_version" {
-  default=""
+  default = ""
 }
 
 variable "machine_type" {
@@ -38,18 +46,69 @@ variable "machine_type" {
 variable "node_count" {
   default = "4"
 }
+variable "zone" {
+  default     = "us-west1-c"
+  description = "The GCP zone to create the cluster in"
+}
 
-module "agones" {
-  source = "git::https://github.com/googleforgames/agones.git//install/terraform/?ref=master"
-  
+variable "network" {
+  default     = "default"
+  description = "The name of the VPC network to attach the cluster and firewall rule to"
+}
+
+variable "subnetwork" {
+  default     = ""
+  description = "The subnetwork to host the cluster in. Required field if network value isn't 'default'."
+}
+
+variable "log_level" {
+  default = "info"
+}
+
+variable "feature_gates" {
+  default = ""
+}
+
+module "gke_cluster" {
+  // ***************************************************************************************************
+  // Update ?ref= to the agones release you are installing. For example, ?ref=release-1.8.0 corresponds
+  // to Agones version 1.8.0
+  // ***************************************************************************************************
+  source = "git::https://github.com/googleforgames/agones.git//install/terraform/modules/gke/?ref=master"
+
   cluster = {
-      "zone"             = "us-west1-c"
-      "name"             = "${var.name}"
-      "machineType"      = "${var.machine_type}"
-      "initialNodeCount" = "${var.node_count}"
-      "project"          = "${var.project}"
+    "name"             = var.name
+    "zone"             = var.zone
+    "machineType"      = var.machine_type
+    "initialNodeCount" = var.node_count
+    "project"          = var.project
+    "network"          = var.network
+    "subnetwork"       = var.subnetwork
   }
-  agones_version = "${var.agones_version}"
-  values_file=""
-  chart="agones"
+}
+
+module "helm_agones" {
+  // ***************************************************************************************************
+  // Update ?ref= to the agones release you are installing. For example, ?ref=release-1.8.0 corresponds
+  // to Agones version 1.8.0
+  // ***************************************************************************************************
+  source = "git::https://github.com/googleforgames/agones.git//install/terraform/modules/helm3/?ref=master"
+
+  agones_version         = var.agones_version
+  values_file            = ""
+  feature_gates          = var.feature_gates
+  host                   = module.gke_cluster.host
+  token                  = module.gke_cluster.token
+  cluster_ca_certificate = module.gke_cluster.cluster_ca_certificate
+  log_level              = var.log_level
+}
+
+output "host" {
+  value = module.gke_cluster.host
+}
+output "token" {
+  value = module.gke_cluster.token
+}
+output "cluster_ca_certificate" {
+  value = module.gke_cluster.cluster_ca_certificate
 }

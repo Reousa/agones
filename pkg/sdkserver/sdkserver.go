@@ -29,6 +29,8 @@ import (
 	"agones.dev/agones/pkg/client/informers/externalversions"
 	listersv1 "agones.dev/agones/pkg/client/listers/agones/v1"
 	"agones.dev/agones/pkg/sdk"
+	"agones.dev/agones/pkg/sdk/alpha"
+	"agones.dev/agones/pkg/sdk/beta"
 	"agones.dev/agones/pkg/util/logfields"
 	"agones.dev/agones/pkg/util/runtime"
 	"agones.dev/agones/pkg/util/workerqueue"
@@ -36,6 +38,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"golang.org/x/net/context"
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/util/clock"
@@ -51,12 +54,19 @@ import (
 type Operation string
 
 const (
-	updateState      Operation = "updateState"
-	updateLabel      Operation = "updateLabel"
-	updateAnnotation Operation = "updateAnnotation"
+	updateState             Operation     = "updateState"
+	updateLabel             Operation     = "updateLabel"
+	updateAnnotation        Operation     = "updateAnnotation"
+	updatePlayerCapacity    Operation     = "updatePlayerCapacity"
+	updateConnectedPlayers  Operation     = "updateConnectedPlayers"
+	playerCountUpdatePeriod time.Duration = time.Second
 )
 
-var _ sdk.SDKServer = &SDKServer{}
+var (
+	_ sdk.SDKServer   = &SDKServer{}
+	_ alpha.SDKServer = &SDKServer{}
+	_ beta.SDKServer  = &SDKServer{}
+)
 
 // SDKServer is a gRPC server, that is meant to be a sidecar
 // for a GameServer that will update the game server status on SDK requests
@@ -88,6 +98,8 @@ type SDKServer struct {
 	gsWaitForSync      sync.WaitGroup
 	reserveTimer       *time.Timer
 	gsReserveDuration  *time.Duration
+	gsPlayerCapacity   int64
+	gsConnectedPlayers []string
 }
 
 // NewSDKServer creates a SDKServer that sets up an
@@ -121,6 +133,7 @@ func NewSDKServer(gameServerName, namespace string, kubeClient kubernetes.Interf
 		gsAnnotations:      map[string]string{},
 		gsUpdateMutex:      sync.RWMutex{},
 		gsWaitForSync:      sync.WaitGroup{},
+		gsConnectedPlayers: []string{},
 	}
 
 	s.informerFactory = factory
@@ -196,17 +209,17 @@ func (s *SDKServer) Run(stop <-chan struct{}) error {
 	if gs.Spec.SdkServer.LogLevel != "" {
 		logLevel = gs.Spec.SdkServer.LogLevel
 	}
-	s.logger.WithField("logLevel", logLevel).Info("Setting LogLevel configuration")
+	s.logger.WithField("logLevel", logLevel).Debug("Setting LogLevel configuration")
 	level, err := logrus.ParseLevel(strings.ToLower(string(logLevel)))
 	if err == nil {
 		s.logger.Logger.SetLevel(level)
 	} else {
-		s.logger.WithError(err).Info("Specified wrong Logging.SdkServer. Setting default loglevel - Info")
+		s.logger.WithError(err).Warn("Specified wrong Logging.SdkServer. Setting default loglevel - Info")
 		s.logger.Logger.SetLevel(logrus.InfoLevel)
 	}
 
 	s.health = gs.Spec.Health
-	s.logger.WithField("health", s.health).Info("Setting health configuration")
+	s.logger.WithField("health", s.health).Debug("Setting health configuration")
 	s.healthTimeout = time.Duration(gs.Spec.Health.PeriodSeconds) * time.Second
 	s.initHealthLastUpdated(time.Duration(gs.Spec.Health.InitialDelaySeconds) * time.Second)
 
@@ -218,16 +231,26 @@ func (s *SDKServer) Run(stop <-chan struct{}) error {
 
 	// start health checking running
 	if !s.health.Disabled {
-		s.logger.Info("Starting GameServer health checking")
+		s.logger.Debug("Starting GameServer health checking")
 		go wait.Until(s.runHealth, s.healthTimeout, stop)
 	}
 
+	// populate player tracking values
+	if runtime.FeatureEnabled(runtime.FeaturePlayerTracking) {
+		s.gsUpdateMutex.Lock()
+		if gs.Status.Players != nil {
+			s.gsPlayerCapacity = gs.Status.Players.Capacity
+			s.gsConnectedPlayers = gs.Status.Players.IDs
+		}
+		s.gsUpdateMutex.Unlock()
+	}
+
 	// then start the http endpoints
-	s.logger.Info("Starting SDKServer http health check...")
+	s.logger.Debug("Starting SDKServer http health check...")
 	go func() {
 		if err := s.server.ListenAndServe(); err != nil {
 			if err == http.ErrServerClosed {
-				s.logger.WithError(err).Info("Health check: http server closed")
+				s.logger.WithError(err).Error("Health check: http server closed")
 			} else {
 				err = errors.Wrap(err, "Could not listen on :8080")
 				runtime.HandleError(s.logger.WithError(err), err)
@@ -253,6 +276,10 @@ func (s *SDKServer) syncGameServer(key string) error {
 		return s.updateLabels()
 	case updateAnnotation:
 		return s.updateAnnotations()
+	case updatePlayerCapacity:
+		return s.updatePlayerCapacity()
+	case updateConnectedPlayers:
+		return s.updateConnectedPlayers()
 	}
 
 	return errors.Errorf("could not sync game server key: %s", key)
@@ -261,7 +288,7 @@ func (s *SDKServer) syncGameServer(key string) error {
 // updateState sets the GameServer Status's state to the one persisted in SDKServer,
 // i.e. SDKServer.gsState.
 func (s *SDKServer) updateState() error {
-	s.logger.WithField("state", s.gsState).Info("Updating state")
+	s.logger.WithField("state", s.gsState).Debug("Updating state")
 	if len(s.gsState) == 0 {
 		return errors.Errorf("could not update GameServer %s/%s to empty state", s.namespace, s.gameServerName)
 	}
@@ -274,29 +301,30 @@ func (s *SDKServer) updateState() error {
 
 	// If we are currently in shutdown/being deleted, there is no escaping.
 	if gs.IsBeingDeleted() {
-		s.logger.Info("GameServerState being shutdown. Skipping update.")
+		s.logger.Debug("GameServerState being shutdown. Skipping update.")
 		return nil
 	}
 
 	// If the state is currently unhealthy, you can't go back to Ready.
 	if gs.Status.State == agonesv1.GameServerStateUnhealthy {
-		s.logger.Info("GameServerState already unhealthy. Skipping update.")
+		s.logger.Debug("GameServerState already unhealthy. Skipping update.")
 		return nil
 	}
 
 	s.gsUpdateMutex.RLock()
-	gs.Status.State = s.gsState
+	gsCopy := gs.DeepCopy()
+	gsCopy.Status.State = s.gsState
 
 	// If we are setting the Reserved status, check for the duration, and set that too.
-	if gs.Status.State == agonesv1.GameServerStateReserved && s.gsReserveDuration != nil {
+	if gsCopy.Status.State == agonesv1.GameServerStateReserved && s.gsReserveDuration != nil {
 		n := metav1.NewTime(time.Now().Add(*s.gsReserveDuration))
-		gs.Status.ReservedUntil = &n
+		gsCopy.Status.ReservedUntil = &n
 	} else {
-		gs.Status.ReservedUntil = nil
+		gsCopy.Status.ReservedUntil = nil
 	}
 	s.gsUpdateMutex.RUnlock()
 
-	_, err = gameServers.Update(gs)
+	gs, err = gameServers.Update(gsCopy)
 	if err != nil {
 		return errors.Wrapf(err, "could not update GameServer %s/%s to state %s", s.namespace, s.gameServerName, gs.Status.State)
 	}
@@ -333,7 +361,7 @@ func (s *SDKServer) gameServer() (*agonesv1.GameServer, error) {
 // updateLabels updates the labels on this GameServer to the ones persisted in SDKServer,
 // i.e. SDKServer.gsLabels, with the prefix of "agones.dev/sdk-"
 func (s *SDKServer) updateLabels() error {
-	s.logger.WithField("labels", s.gsLabels).Info("Updating label")
+	s.logger.WithField("labels", s.gsLabels).Debug("Updating label")
 	gs, err := s.gameServer()
 	if err != nil {
 		return err
@@ -357,7 +385,7 @@ func (s *SDKServer) updateLabels() error {
 // updateAnnotations updates the Annotations on this GameServer to the ones persisted in SDKServer,
 // i.e. SDKServer.gsAnnotations, with the prefix of "agones.dev/sdk-"
 func (s *SDKServer) updateAnnotations() error {
-	s.logger.WithField("annotations", s.gsAnnotations).Info("updating annotation")
+	s.logger.WithField("annotations", s.gsAnnotations).Debug("Updating annotation")
 	gs, err := s.gameServer()
 	if err != nil {
 		return err
@@ -390,7 +418,7 @@ func (s *SDKServer) enqueueState(state agonesv1.GameServerState) {
 // Ready enters the RequestReady state change for this GameServer into
 // the workqueue so it can be updated
 func (s *SDKServer) Ready(ctx context.Context, e *sdk.Empty) (*sdk.Empty, error) {
-	s.logger.Info("Received Ready request, adding to queue")
+	s.logger.Debug("Received Ready request, adding to queue")
 	s.stopReserveTimer()
 	s.enqueueState(agonesv1.GameServerStateRequestReady)
 	return e, nil
@@ -406,7 +434,7 @@ func (s *SDKServer) Allocate(ctx context.Context, e *sdk.Empty) (*sdk.Empty, err
 // Shutdown enters the Shutdown state change for this GameServer into
 // the workqueue so it can be updated
 func (s *SDKServer) Shutdown(ctx context.Context, e *sdk.Empty) (*sdk.Empty, error) {
-	s.logger.Info("Received Shutdown request, adding to queue")
+	s.logger.Debug("Received Shutdown request, adding to queue")
 	s.stopReserveTimer()
 	s.enqueueState(agonesv1.GameServerStateShutdown)
 	return e, nil
@@ -418,13 +446,13 @@ func (s *SDKServer) Health(stream sdk.SDK_HealthServer) error {
 	for {
 		_, err := stream.Recv()
 		if err == io.EOF {
-			s.logger.Info("Health stream closed.")
+			s.logger.Debug("Health stream closed.")
 			return stream.SendAndClose(&sdk.Empty{})
 		}
 		if err != nil {
 			return errors.Wrap(err, "Error with Health check")
 		}
-		s.logger.Info("Health Ping Received")
+		s.logger.Debug("Health Ping Received")
 		s.touchHealthLastUpdated()
 	}
 }
@@ -432,7 +460,7 @@ func (s *SDKServer) Health(stream sdk.SDK_HealthServer) error {
 // SetLabel adds the Key/Value to be used to set the label with the metadataPrefix to the `GameServer`
 // metdata
 func (s *SDKServer) SetLabel(_ context.Context, kv *sdk.KeyValue) (*sdk.Empty, error) {
-	s.logger.WithField("values", kv).Info("Adding SetLabel to queue")
+	s.logger.WithField("values", kv).Debug("Adding SetLabel to queue")
 
 	s.gsUpdateMutex.Lock()
 	s.gsLabels[kv.Key] = kv.Value
@@ -445,7 +473,7 @@ func (s *SDKServer) SetLabel(_ context.Context, kv *sdk.KeyValue) (*sdk.Empty, e
 // SetAnnotation adds the Key/Value to be used to set the annotations with the metadataPrefix to the `GameServer`
 // metdata
 func (s *SDKServer) SetAnnotation(_ context.Context, kv *sdk.KeyValue) (*sdk.Empty, error) {
-	s.logger.WithField("values", kv).Info("Adding SetAnnotation to queue")
+	s.logger.WithField("values", kv).Debug("Adding SetAnnotation to queue")
 
 	s.gsUpdateMutex.Lock()
 	s.gsAnnotations[kv.Key] = kv.Value
@@ -457,19 +485,31 @@ func (s *SDKServer) SetAnnotation(_ context.Context, kv *sdk.KeyValue) (*sdk.Emp
 
 // GetGameServer returns the current GameServer configuration and state from the backing GameServer CRD
 func (s *SDKServer) GetGameServer(context.Context, *sdk.Empty) (*sdk.GameServer, error) {
-	s.logger.Info("Received GetGameServer request")
+	s.logger.Debug("Received GetGameServer request")
 	gs, err := s.gameServer()
 	if err != nil {
 		return nil, err
 	}
-
 	return convert(gs), nil
 }
 
 // WatchGameServer sends events through the stream when changes occur to the
 // backing GameServer configuration / status
 func (s *SDKServer) WatchGameServer(_ *sdk.Empty, stream sdk.SDK_WatchGameServerServer) error {
-	s.logger.Info("Received WatchGameServer request, adding stream to connectedStreams")
+	s.logger.Debug("Received WatchGameServer request, adding stream to connectedStreams")
+
+	if runtime.FeatureEnabled(runtime.FeatureSDKWatchSendOnExecute) {
+		gs, err := s.GetGameServer(context.Background(), &sdk.Empty{})
+		if err != nil {
+			return err
+		}
+
+		err = stream.Send(gs)
+		if err != nil {
+			return err
+		}
+	}
+
 	s.streamMutex.Lock()
 	s.connectedStreams = append(s.connectedStreams, stream)
 	s.streamMutex.Unlock()
@@ -492,7 +532,7 @@ func (s *SDKServer) Reserve(ctx context.Context, d *sdk.Duration) (*sdk.Empty, e
 		s.gsUpdateMutex.Unlock()
 	}
 
-	s.logger.Info("Received Reserve request, adding to queue")
+	s.logger.Debug("Received Reserve request, adding to queue")
 	s.enqueueState(agonesv1.GameServerStateReserved)
 
 	return e, nil
@@ -523,9 +563,145 @@ func (s *SDKServer) stopReserveTimer() {
 	s.gsReserveDuration = nil
 }
 
+// PlayerConnect should be called when a player connects.
+// [Stage:Alpha]
+// [FeatureFlag:PlayerTracking]
+func (s *SDKServer) PlayerConnect(ctx context.Context, id *alpha.PlayerID) (*alpha.Bool, error) {
+	if !runtime.FeatureEnabled(runtime.FeaturePlayerTracking) {
+		return nil, errors.Errorf("%s not enabled", runtime.FeaturePlayerTracking)
+	}
+	s.logger.WithField("PlayerId", id.PlayerID).Debug("Player Connected")
+
+	s.gsUpdateMutex.Lock()
+	defer s.gsUpdateMutex.Unlock()
+
+	// the player is already connected, return false.
+	for _, playerID := range s.gsConnectedPlayers {
+		if playerID == id.PlayerID {
+			return &alpha.Bool{Bool: false}, nil
+		}
+	}
+
+	if int64(len(s.gsConnectedPlayers)) >= s.gsPlayerCapacity {
+		return &alpha.Bool{}, errors.New("players are already at capacity")
+	}
+
+	// let's retain the original order, as it should be a smaller patch on data change
+	s.gsConnectedPlayers = append(s.gsConnectedPlayers, id.PlayerID)
+	s.workerqueue.EnqueueAfter(cache.ExplicitKey(string(updateConnectedPlayers)), playerCountUpdatePeriod)
+
+	return &alpha.Bool{Bool: true}, nil
+}
+
+// PlayerDisconnect should be called when a player disconnects.
+// [Stage:Alpha]
+// [FeatureFlag:PlayerTracking]
+func (s *SDKServer) PlayerDisconnect(ctx context.Context, id *alpha.PlayerID) (*alpha.Bool, error) {
+	if !runtime.FeatureEnabled(runtime.FeaturePlayerTracking) {
+		return nil, errors.Errorf("%s not enabled", runtime.FeaturePlayerTracking)
+	}
+	s.logger.WithField("PlayerId", id.PlayerID).Debug("Player Disconnected")
+
+	s.gsUpdateMutex.Lock()
+	defer s.gsUpdateMutex.Unlock()
+
+	found := -1
+	for i, playerID := range s.gsConnectedPlayers {
+		if playerID == id.PlayerID {
+			found = i
+			break
+		}
+	}
+	if found == -1 {
+		return &alpha.Bool{Bool: false}, nil
+	}
+
+	// let's retain the original order, as it should be a smaller patch on data change
+	s.gsConnectedPlayers = append(s.gsConnectedPlayers[:found], s.gsConnectedPlayers[found+1:]...)
+	s.workerqueue.EnqueueAfter(cache.ExplicitKey(string(updateConnectedPlayers)), playerCountUpdatePeriod)
+
+	return &alpha.Bool{Bool: true}, nil
+}
+
+// IsPlayerConnected returns if the playerID is currently connected to the GameServer.
+// This is always accurate, even if the value hasn’t been updated to the GameServer status yet.
+// [Stage:Alpha]
+// [FeatureFlag:PlayerTracking]
+func (s *SDKServer) IsPlayerConnected(ctx context.Context, id *alpha.PlayerID) (*alpha.Bool, error) {
+	if !runtime.FeatureEnabled(runtime.FeaturePlayerTracking) {
+		return nil, errors.Errorf("%s not enabled", runtime.FeaturePlayerTracking)
+	}
+	s.gsUpdateMutex.RLock()
+	defer s.gsUpdateMutex.RUnlock()
+
+	result := &alpha.Bool{Bool: false}
+
+	for _, playerID := range s.gsConnectedPlayers {
+		if playerID == id.PlayerID {
+			result.Bool = true
+			break
+		}
+	}
+
+	return result, nil
+}
+
+// GetConnectedPlayers returns the list of the currently connected player ids.
+// This is always accurate, even if the value hasn’t been updated to the GameServer status yet.
+// [Stage:Alpha]
+// [FeatureFlag:PlayerTracking]
+func (s *SDKServer) GetConnectedPlayers(c context.Context, empty *alpha.Empty) (*alpha.PlayerIDList, error) {
+	if !runtime.FeatureEnabled(runtime.FeaturePlayerTracking) {
+		return nil, errors.Errorf("%s not enabled", runtime.FeaturePlayerTracking)
+	}
+	s.gsUpdateMutex.RLock()
+	defer s.gsUpdateMutex.RUnlock()
+
+	return &alpha.PlayerIDList{List: s.gsConnectedPlayers}, nil
+}
+
+// GetPlayerCount returns the current player count.
+// [Stage:Alpha]
+// [FeatureFlag:PlayerTracking]
+func (s *SDKServer) GetPlayerCount(ctx context.Context, _ *alpha.Empty) (*alpha.Count, error) {
+	if !runtime.FeatureEnabled(runtime.FeaturePlayerTracking) {
+		return nil, errors.Errorf("%s not enabled", runtime.FeaturePlayerTracking)
+	}
+	s.gsUpdateMutex.RLock()
+	defer s.gsUpdateMutex.RUnlock()
+	return &alpha.Count{Count: int64(len(s.gsConnectedPlayers))}, nil
+}
+
+// SetPlayerCapacity to change the game server's player capacity.
+// [Stage:Alpha]
+// [FeatureFlag:PlayerTracking]
+func (s *SDKServer) SetPlayerCapacity(ctx context.Context, count *alpha.Count) (*alpha.Empty, error) {
+	if !runtime.FeatureEnabled(runtime.FeaturePlayerTracking) {
+		return nil, errors.Errorf("%s not enabled", runtime.FeaturePlayerTracking)
+	}
+	s.gsUpdateMutex.Lock()
+	s.gsPlayerCapacity = count.Count
+	s.gsUpdateMutex.Unlock()
+	s.workerqueue.Enqueue(cache.ExplicitKey(string(updatePlayerCapacity)))
+
+	return &alpha.Empty{}, nil
+}
+
+// GetPlayerCapacity returns the current player capacity, as set by SDK.SetPlayerCapacity()
+// [Stage:Alpha]
+// [FeatureFlag:PlayerTracking]
+func (s *SDKServer) GetPlayerCapacity(ctx context.Context, _ *alpha.Empty) (*alpha.Count, error) {
+	if !runtime.FeatureEnabled(runtime.FeaturePlayerTracking) {
+		return nil, errors.Errorf("%s not enabled", runtime.FeaturePlayerTracking)
+	}
+	s.gsUpdateMutex.RLock()
+	defer s.gsUpdateMutex.RUnlock()
+	return &alpha.Count{Count: s.gsPlayerCapacity}, nil
+}
+
 // sendGameServerUpdate sends a watch game server event
 func (s *SDKServer) sendGameServerUpdate(gs *agonesv1.GameServer) {
-	s.logger.Info("Sending GameServer Event to connectedStreams")
+	s.logger.Debug("Sending GameServer Event to connectedStreams")
 
 	s.streamMutex.RLock()
 	defer s.streamMutex.RUnlock()
@@ -548,7 +724,7 @@ func (s *SDKServer) sendGameServerUpdate(gs *agonesv1.GameServer) {
 func (s *SDKServer) runHealth() {
 	s.checkHealth()
 	if !s.healthy() {
-		s.logger.WithField("gameServerName", s.gameServerName).Info("GameServer has failed health check")
+		s.logger.WithField("gameServerName", s.gameServerName).Warn("GameServer has failed health check")
 		s.enqueueState(agonesv1.GameServerStateUnhealthy)
 	}
 }
@@ -571,7 +747,7 @@ func (s *SDKServer) checkHealth() {
 		s.healthMutex.Lock()
 		defer s.healthMutex.Unlock()
 		s.healthFailureCount++
-		s.logger.WithField("failureCount", s.healthFailureCount).Infof("GameServer Health Check failed")
+		s.logger.WithField("failureCount", s.healthFailureCount).Warn("GameServer Health Check failed")
 	}
 }
 
@@ -586,4 +762,62 @@ func (s *SDKServer) healthy() bool {
 	s.healthMutex.RLock()
 	defer s.healthMutex.RUnlock()
 	return s.healthFailureCount < s.health.FailureThreshold
+}
+
+// updatePlayerCapacity updates the Player Capacity field in the GameServer's Status.
+func (s *SDKServer) updatePlayerCapacity() error {
+	if !runtime.FeatureEnabled(runtime.FeaturePlayerTracking) {
+		return errors.Errorf("%s not enabled", runtime.FeaturePlayerTracking)
+	}
+	s.logger.WithField("capacity", s.gsPlayerCapacity).Debug("updating player capacity")
+	gs, err := s.gameServer()
+	if err != nil {
+		return err
+	}
+
+	gsCopy := gs.DeepCopy()
+
+	s.gsUpdateMutex.RLock()
+	gsCopy.Status.Players.Capacity = s.gsPlayerCapacity
+	s.gsUpdateMutex.RUnlock()
+
+	gs, err = s.gameServerGetter.GameServers(s.namespace).Update(gsCopy)
+	if err != nil {
+		return err
+	}
+	s.recorder.Event(gs, corev1.EventTypeNormal, "PlayerCapacity", fmt.Sprintf("Set to %d", gs.Status.Players.Capacity))
+	return nil
+}
+
+// updateConnectedPlayers updates the Player IDs and Count fields in the GameServer's Status.
+func (s *SDKServer) updateConnectedPlayers() error {
+	if !runtime.FeatureEnabled(runtime.FeaturePlayerTracking) {
+		return errors.Errorf("%s not enabled", runtime.FeaturePlayerTracking)
+	}
+	gs, err := s.gameServer()
+	if err != nil {
+		return err
+	}
+
+	gsCopy := gs.DeepCopy()
+	same := false
+	s.gsUpdateMutex.RLock()
+	s.logger.WithField("playerIDs", s.gsConnectedPlayers).Debug("updating connected players")
+	same = apiequality.Semantic.DeepEqual(gsCopy.Status.Players.IDs, s.gsConnectedPlayers)
+	gsCopy.Status.Players.IDs = s.gsConnectedPlayers
+	gsCopy.Status.Players.Count = int64(len(s.gsConnectedPlayers))
+	s.gsUpdateMutex.RUnlock()
+	// if there is no change, then don't update
+	// since it's possible this could fire quite a lot, let's reduce the
+	// amount of requests as much as possible.
+	if same {
+		return nil
+	}
+
+	gs, err = s.gameServerGetter.GameServers(s.namespace).Update(gsCopy)
+	if err != nil {
+		return err
+	}
+	s.recorder.Event(gs, corev1.EventTypeNormal, "PlayerCount", fmt.Sprintf("Set to %d", gs.Status.Players.Count))
+	return nil
 }

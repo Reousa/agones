@@ -148,4 +148,16 @@ properties:
             type: integer
             minimum: 1
             maximum: 2147483648
+      alpha:
+        type: object
+        title: Alpha properties for the GameServer
+        properties:
+          players:
+            type: object
+            title: Configuration of player capacity
+            properties:
+              initialCapacity:
+                type: integer
+                title: The initial player capacity of this Game Server
+                minimum: 0
 {{- end }}

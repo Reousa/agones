@@ -41,6 +41,8 @@ Table of Contents
         * [make install](#make-install)
         * [make uninstall](#make-uninstall)
         * [make test-e2e](#make-test-e2e)
+        * [make test-e2e-integration](#make-test-e2e-integration)
+        * [make test-e2e-failure](#make-test-e2e-failure)
         * [make setup-prometheus](#make-setup-prometheus)
         * [make setup-grafana](#make-setup-grafana)
         * [make prometheus-portforward](#make-prometheus-portforward)
@@ -61,6 +63,7 @@ Table of Contents
      * [Google Cloud Platform](#google-cloud-platform)
         * [make gcloud-init](#make-gcloud-init)
         * [make gcloud-test-cluster](#make-gcloud-test-cluster)
+        * [make clean-gcloud-test-cluster](#make-clean-gcloud-test-cluster)
         * [make gcloud-auth-cluster](#make-gcloud-auth-cluster)
         * [make gcloud-auth-docker](#make-gcloud-auth-docker)
      * [Minikube](#minikube)
@@ -86,9 +89,6 @@ Table of Contents
         * [make kind-test-e2e](#make-kind-test-e2e)
         * [make kind-shell](#make-kind-shell)
         * [make kind-controller-portforward](#make-kind-controller-portforward)
-     * [Custom Environment](#custom-environment)
-        * [make setup-test-cluster](#make-setup-test-cluster)
-        * [make clean-test-cluster](#make-clean-test-cluster)
   * [Dependencies](#dependencies)
   * [Troubleshooting](#troubleshooting)
       * [$GOPATH/$GOROOT error when building in WSL](#gopathgoroot-error-when-building-in-wsl)
@@ -152,10 +152,11 @@ If you are not familiar with GOPATHs, you can read [How to Write Go Code](https:
 
 Make sure you are in the `build` directory to start.
 
-First, let's test all the code. To do this, run `make test`, which will execute all the unit tests for the codebase. 
+First, let's test the Agones system code. To do this, run `make test-go`, which will execute all the unit tests for
+the Go codebase (there are other tests, but they can take a long time to run).
 
-If you haven't run any of the `build` make targets before then this will also create the Docker based build image,
-and then run the tests.
+If you haven't run any of Make targets before then this will also create the Docker based build
+image, and then run the tests.
 
 Building the build image may take a few minutes to download all the dependencies, so feel 
 free to make cup of tea or coffee at this point. ☕️ 
@@ -178,6 +179,9 @@ You may note that docker images, and tar archives are tagged with a concatenatio
 upcoming release number and short git hash for the current commit. This has also been set in 
 the code itself, so that it can be seen in via log statements.
 
+If you don't have a long time to kill, you can run `make build-images` to only build the images for running Agones
+, which is often all you need for development.
+
 Congratulations! You have now successfully tested and built Agones!
 
 ### Running a Test Google Kubernetes Engine Cluster
@@ -192,8 +196,8 @@ everything separate (see below for overwriting these config locations). Therefor
 we will need to authenticate out gcloud tooling against it. To do that run `make gcloud-init` and fill in the
 prompts as directed.
 
-Once authenticated, to create the test cluster, run `make gcloud-test-cluster`, which will use the deployment template
-found in the `gke-test-cluster` directory.
+Once authenticated, to create the test cluster, run `make gcloud-test-cluster`, which will use the Terraform
+configuration found in the `build/terraform/gke` directory.
 
 You can customize GKE cluster via environment variables or by using a [`local-includes`](./local-includes) file.
 See the table below for available customizations :
@@ -349,14 +353,12 @@ To begin, you need to set up the following environment variables:
    if set, `make install` will install this secret in both the `agones-system` (for pulling the controller image)
    and `default` (for pulling the sdk image) repositories
    
-The second step is to prepare your cluster for the Agones deployments. Run `make setup-test-cluster` to install helm in it.
-
 Now you're ready to begin the development/test cycle:
 - `make build` will build Agones
 - `make test` will run local tests, which includes `site-test` target
 - `make push` will push the Agones images to your image repository 
-- `make test-e2e` will run end-to-end tests in your cluster
 - `make install` will install/upgrade Agones into your cluster
+- `make test-e2e` will run end-to-end tests in your cluster
 
 You can combine some of the above steps into a single one, for example `make build push install` or `make build push test-e2e`.
 
@@ -369,7 +371,7 @@ Have a look in the [examples](../examples) folder to see examples of running Gam
 ## Make Variable Reference
 
 ### VERSION
-The version of this build. Version defaults to the short hash of the latest commit
+The version of this build. Version defaults to the short hash of the latest commit.
 
 ### REGISTRY
 The registry that is being used to store docker images. Defaults to gcr.io/agones-images - the release + CI registry.
@@ -378,7 +380,7 @@ The registry that is being used to store docker images. Defaults to gcr.io/agone
 The Kubernetes config file used to access the cluster. Defaults to `~/.kube/config` - the file used by default by kubectl.
 
 ### CLUSTER_NAME
-The (gcloud) test cluster that is being worked against. Defaults to `test-cluster`
+The (gcloud) test cluster that is being worked against. Defaults to `test-cluster`.
 
 ### GCP_PROJECT
 Your GCP project for deploying GKE cluster. Defaults to gcloud default project settings.
@@ -403,7 +405,7 @@ All targets will create the build image if it is not present.
 
 ### Development Targets
 
-Targets for developing with the build image
+Targets for developing with the build image.
 
 #### `make build`
 Build all the images required for Agones, as well as the SDKs
@@ -474,7 +476,22 @@ These tests validate Agones flow from start to finish.
 
 It uses the KUBECONFIG to target a Kubernetes cluster.
 
+Use `GAMESERVERS_NAMESPACE` flag to provide a namespace or leave it empty in order to create and use a random one.
+
 See [`make minikube-test-e2e`](#make-minikube-test-e2e) to run end-to-end tests on Minikube.
+
+#### `make test-e2e-integration`
+Runs integration portion of the end-to-end tests.
+
+Pass flags to [go test](https://golang.org/cmd/go/#hdr-Testing_flags) command
+using the `ARGS` parameter. For example, to run only the `TestGameServerReserve` test:
+
+```bash
+make test-e2e-integration ARGS='-run TestGameServerReserve'
+```
+
+#### `make test-e2e-failure`
+Run controller failure portion of the end-to-end tests.
 
 #### `make setup-prometheus`
 
@@ -485,6 +502,10 @@ By default all exporters and alertmanager is disabled.
 You can use this to collect Agones [Metrics](../site/content/en/docs/Guides/metrics.md).
 
 See [`make minikube-setup-prometheus`](#make-minikube-setup-prometheus) and [`make kind-setup-prometheus`](#make-kind-setup-prometheus) to run the installation on Minikube or Kind.
+
+#### make helm-repo-update
+
+Run helm repo update to get the mose recent charts.
 
 #### `make setup-grafana`
 
@@ -564,14 +585,17 @@ A set of utilities for setting up a Kubernetes Engine cluster on Google Cloud Pl
 since it's an easy way to get a test cluster working with Kubernetes.
 
 #### `make gcloud-init`
-Initialise the gcloud login and project configuration, if you are working with GCP
+Initialise the gcloud login and project configuration, if you are working with GCP.
 
 #### `make gcloud-test-cluster`
-Creates and authenticates a small, 3 node GKE cluster to work against
+Creates and authenticates a GKE cluster to work against.
+
+#### `make clean-gcloud-test-cluster`
+Delete a GKE cluster previously created with `make gcloud-test-cluster`.
 
 #### `make gcloud-auth-cluster`
 Pulls down authentication information for kubectl against a cluster, name can be specified through CLUSTER_NAME
-(defaults to 'test-cluster')
+(defaults to 'test-cluster').
 
 #### `make gcloud-auth-docker`
 Creates a short lived access to Google Cloud container repositories, so that you are able to call
@@ -580,9 +604,6 @@ Creates a short lived access to Google Cloud container repositories, so that you
 ### Terraform
 
 Utilities for deploying a Kubernetes Engine cluster on Google Cloud Platform using `google` Terraform provider.
-
-#### `make terraform-init`
-Install `google` and `google-beta` terraform providers and authorize.
 
 #### `make gcloud-terraform-cluster`
 Create GKE cluster and install release version of agones.
@@ -607,6 +628,14 @@ Run `terraform destroy` on your cluster.
 
 #### `make terraform-clean`
 Remove .terraform directory with configs as well as tfstate files.
+
+#### `make terraform-test GCP_PROJECT="<YOUR_PROJECT_ID>"`
+Run Golang test which emulates and verifies successful execution of next two steps:
+```
+make gcloud-terraform-cluster
+make gcloud-terraform-destroy-cluster
+```
+Singleton, could not be executed in parallel with itself. As it uses the one terraform tfstate file.
 
 ### Minikube
 
@@ -717,14 +746,6 @@ instead of `make shell` to start an interactive shell for development on Kind.
 #### `make kind-controller-portforward`
 The Kind version of [`make controller-portforward`](#make-controller-portforward) to setup
 port forwarding to the controller deployment.
-
-### Custom Environment
-
-#### `make setup-test-cluster`
-Initializes your custom cluster for working with Agones, by installing Helm/Tiller.
-
-#### `make clean-test-cluster`
-Cleans up your custom cluster by resetting Helm.
 
 ## Dependencies
 

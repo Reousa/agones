@@ -30,8 +30,8 @@ but other methods may also work as well.
 Kubernetes Go Client tooling generates a Client for Agones that we can use to interact with the Agones
 installation on our Kubernetes cluster.
 
-- [Godoc for the Agones Client](https://godoc.org/agones.dev/agones/pkg/client/clientset/versioned)
-- [Godoc for the standard Kubernetes Client](https://godoc.org/k8s.io/client-go)
+- [Godoc for the Agones Client](https://pkg.go.dev/agones.dev/agones/pkg/client/clientset/versioned)
+- [Godoc for the standard Kubernetes Client](https://pkg.go.dev/k8s.io/client-go/kubernetes)
 
 ### Authentication
 
@@ -116,13 +116,14 @@ func main() {
 }
 ```
 In order to create GS using provided example, you can run it as a Kubernetes Job:
-```
+```bash
 $ kubectl create -f https://raw.githubusercontent.com/googleforgames/agones/{{< release-branch >}}/examples/crd-client/create-gs.yaml --namespace agones-system
 $ kubectl get pods --namespace agones-system
 NAME                                 READY   STATUS      RESTARTS   AGE
-pi-with-timeout-8qvfj                0/1     Completed   0          6s
-$ kubectl logs pi-with-timeout-8qvfj  --namespace agones-syste
-{"message":"\u0026{0xc000243e00 default}","severity":"info","source":"main","time":"2019-12-06T14:36:54.265857671Z"}
+create-gs-6wz86-7qsm5                0/1     Completed   0          6s
+$ kubectl logs create-gs-6wz86-7qsm5  --namespace agones-system
+{"message":"\u0026{0xc0001dde00 default}","severity":"info","source":"main","time":"2020-04-21T11:14:00.477576428Z"}
+{"message":"New GameServer name is: helm-test-server-fxfgg","severity":"info","time":"2020-04-21T11:14:00.516024697Z"}
 ```
 You have just created a GameServer using Kubernetes Go Client.
 
@@ -132,7 +133,7 @@ If there isn't a client written in your preferred language, it is always possibl
 directly with Kubernetes API to interact with Agones.
 
 The Kubernetes API can be authenticated and exposed locally through the
-[`kubectl proxy`](https://kubernetes.io/docs/tasks/access-kubernetes-api/http-proxy-access-api/)
+[`kubectl proxy`](https://kubernetes.io/docs/tasks/extend-kubernetes/http-proxy-access-api/)
 
 
 For example:
@@ -301,4 +302,4 @@ section may also provide the more details on the API conventions that are used i
 
 ## Next Steps
 
-- Learn how to interact with Agones programmatically through the API while creating an [Allocator Service]({{< relref "../Tutorials/allocator-service-go.md" >}}).
+- Learn how to use [Allocator Service]({{< relref "../Advanced/allocator-service.md" >}}) for single and multi-cluster Allocation.

@@ -16,7 +16,7 @@ A full `Fleet` specification is available below and in the {{< ghlink href="exam
 apiVersion: "agones.dev/v1"
 kind: Fleet
 # Fleet Metadata
-# https://v1-13.docs.kubernetes.io/docs/reference/generated/kubernetes-api/v1.13/#objectmeta-v1-meta
+# https://v1-16.docs.kubernetes.io/docs/reference/generated/kubernetes-api/v1.16/#objectmeta-v1-meta
 metadata:
   name: fleet-example
 spec:
@@ -67,7 +67,7 @@ spec:
         spec:
           containers:
           - name: simple-udp
-            image: gcr.io/agones-images/udp-server:0.17
+            image: gcr.io/agones-images/udp-server:0.21
 ```
 
 Since Agones defines a new 

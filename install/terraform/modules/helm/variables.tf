@@ -26,6 +26,14 @@ variable "udp_expose" {
   default = "true"
 }
 
+variable "log_level" {
+  default = "info"
+}
+
+variable "feature_gates" {
+  default = ""
+}
+
 variable "host" {}
 
 variable "token" {}
@@ -46,11 +54,11 @@ variable "image_registry" {
 }
 
 variable "pull_policy" {
-  default = "Always"
+  default = "IfNotPresent"
 }
 
 variable "always_pull_sidecar" {
-  default = "true"
+  default = "false"
 }
 
 variable "image_pull_secret" {
@@ -62,5 +70,17 @@ variable "ping_service_type" {
 }
 
 variable "values_file" {
-  default = "../../../helm/agones/values.yaml"
+  default = ""
+}
+
+variable "gameserver_minPort" {
+  default = "7000"
+}
+
+variable "gameserver_maxPort" {
+  default = "8000"
+}
+
+variable "gameserver_namespaces" {
+  default = ["default"]
 }

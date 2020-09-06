@@ -16,11 +16,21 @@ provider "azuread" {
   version = "=0.4.0"
 }
 
+provider "azurerm" {
+  version = "=2.2.0"
+
+  features {}
+}
+
+provider "random" {
+  version = "~> 2.2"
+}
+
 # Create Service Principal password
 resource "azuread_service_principal_password" "aks" {
   end_date             = "2299-12-30T23:00:00Z" # Forever
-  service_principal_id = "${azuread_service_principal.aks.id}"
-  value                = "${random_string.password.result}"
+  service_principal_id = azuread_service_principal.aks.id
+  value                = random_string.password.result
 }
 
 # Create Azure AD Application for Service Principal
@@ -30,7 +40,7 @@ resource "azuread_application" "aks" {
 
 # Create Service Principal
 resource "azuread_service_principal" "aks" {
-  application_id = "${azuread_application.aks.application_id}"
+  application_id = azuread_application.aks.application_id
 }
 
 # Generate random string to be used for Service Principal Password
@@ -39,39 +49,68 @@ resource "random_string" "password" {
   special = true
 }
 
-resource "azurerm_resource_group" "test" {
+resource "azurerm_resource_group" "agones_rg" {
   name     = "agonesRG"
   location = "East US"
 }
 
-resource "azurerm_kubernetes_cluster" "test" {
-  name                = "${var.cluster_name}"
-  location            = "${azurerm_resource_group.test.location}"
-  resource_group_name = "${azurerm_resource_group.test.name}"
+resource "azurerm_kubernetes_cluster" "agones" {
+  name                = var.cluster_name
+  location            = azurerm_resource_group.agones_rg.location
+  resource_group_name = azurerm_resource_group.agones_rg.name
   dns_prefix          = "agones"
 
-  kubernetes_version = "1.13.12"
+  kubernetes_version = "1.15.10"
 
-  agent_pool_profile {
-    name            = "default"
-    count           = 2
-    vm_size         = "${var.machine_type}"
-    os_type         = "Linux"
-    os_disk_size_gb = 30
+  default_node_pool {
+    name                = "default"
+    node_count          = var.node_count
+    vm_size             = var.machine_type
+    os_disk_size_gb     = var.disk_size
+    enable_auto_scaling = false
+    #enable_node_public_ip = true
+    #vnet_subnet_id     = azurerm_subnet.aks.id
   }
+
   service_principal {
-    client_id     = "${azuread_application.aks.application_id}"
-    client_secret = "${azuread_service_principal_password.aks.value}"
+    client_id     = var.client_id
+    client_secret = var.client_secret
   }
   tags = {
     Environment = "Production"
   }
 }
 
-resource "azurerm_network_security_group" "test" {
+resource "azurerm_kubernetes_cluster_node_pool" "system" {
+  name                  = "system"
+  kubernetes_cluster_id = azurerm_kubernetes_cluster.agones.id
+  vm_size               = var.machine_type
+  node_count            = 1
+  os_disk_size_gb       = var.disk_size
+  enable_auto_scaling   = false
+  node_taints           = ["agones.dev/agones-system=true:NoExecute"]
+  node_labels           = {
+    "agones.dev/agones-system":"true"
+  }
+}
+
+resource "azurerm_kubernetes_cluster_node_pool" "metrics" {
+  name                  = "metrics"
+  kubernetes_cluster_id = azurerm_kubernetes_cluster.agones.id
+  vm_size               = var.machine_type
+  node_count            = 1
+  os_disk_size_gb       = var.disk_size
+  enable_auto_scaling   = false
+  node_taints           = ["agones.dev/agones-metrics=true:NoExecute"]
+  node_labels           = {
+    "agones.dev/agones-metrics":"true"
+  }
+}
+
+resource "azurerm_network_security_group" "agones_sg" {
   name                = "agonesSecurityGroup"
-  location            = "${azurerm_resource_group.test.location}"
-  resource_group_name = "${azurerm_resource_group.test.name}"
+  location            = azurerm_resource_group.agones_rg.location
+  resource_group_name = azurerm_resource_group.agones_rg.name
 }
 
 resource "azurerm_network_security_rule" "gameserver" {
@@ -84,8 +123,8 @@ resource "azurerm_network_security_rule" "gameserver" {
   destination_port_range      = "7000-8000"
   source_address_prefix       = "*"
   destination_address_prefix  = "*"
-  resource_group_name         = "${azurerm_resource_group.test.name}"
-  network_security_group_name = "${azurerm_network_security_group.test.name}"
+  resource_group_name         = azurerm_resource_group.agones_rg.name
+  network_security_group_name = azurerm_network_security_group.agones_sg.name
 }
 
 resource "azurerm_network_security_rule" "outbound" {
@@ -98,6 +137,6 @@ resource "azurerm_network_security_rule" "outbound" {
   destination_port_range      = "*"
   source_address_prefix       = "*"
   destination_address_prefix  = "*"
-  resource_group_name         = "${azurerm_resource_group.test.name}"
-  network_security_group_name = "${azurerm_network_security_group.test.name}"
+  resource_group_name         = azurerm_resource_group.agones_rg.name
+  network_security_group_name = azurerm_network_security_group.agones_sg.name
 }

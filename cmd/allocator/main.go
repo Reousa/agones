@@ -14,12 +14,12 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"io/ioutil"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -29,23 +29,23 @@ import (
 
 	"agones.dev/agones/pkg"
 	"agones.dev/agones/pkg/allocation/converters"
-	pb "agones.dev/agones/pkg/allocation/go/v1alpha1"
+	pb "agones.dev/agones/pkg/allocation/go"
 	allocationv1 "agones.dev/agones/pkg/apis/allocation/v1"
 	"agones.dev/agones/pkg/client/clientset/versioned"
 	"agones.dev/agones/pkg/client/informers/externalversions"
 	"agones.dev/agones/pkg/gameserverallocations"
 	"agones.dev/agones/pkg/gameservers"
-	"agones.dev/agones/pkg/metrics"
 	"agones.dev/agones/pkg/util/runtime"
 	"agones.dev/agones/pkg/util/signals"
 	"github.com/heptiolabs/healthcheck"
-	prom "github.com/prometheus/client_golang/prometheus"
-	"github.com/spf13/pflag"
-	"github.com/spf13/viper"
-	"go.opencensus.io/plugin/ochttp"
-	"go.opencensus.io/stats/view"
+	"github.com/pkg/errors"
+	"go.opencensus.io/plugin/ocgrpc"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/status"
 	"gopkg.in/fsnotify.v1"
-	k8serror "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/informers"
@@ -61,19 +61,7 @@ const (
 	certDir = "/home/allocator/client-ca/"
 	tlsDir  = "/home/allocator/tls/"
 	sslPort = "8443"
-
-	enableStackdriverMetricsFlag = "stackdriver-exporter"
-	enablePrometheusMetricsFlag  = "prometheus-exporter"
-	projectIDFlag                = "gcp-project-id"
-	stackdriverLabels            = "stackdriver-labels"
 )
-
-func init() {
-	registerMetricViews()
-}
-
-// A handler for the web server
-type handler func(w http.ResponseWriter, r *http.Request)
 
 func main() {
 	conf := parseEnvFlags()
@@ -101,70 +89,89 @@ func main() {
 		return err
 	})
 
-	h := newServiceHandler(kubeClient, agonesClient, health)
+	h := newServiceHandler(kubeClient, agonesClient, health, conf.MTLSDisabled, conf.TLSDisabled)
 
-	// mux for https server to serve gameserver allocations
-	httpsMux := http.NewServeMux()
-	httpsMux.HandleFunc("/v1alpha1/gameserverallocation", h.postOnly(h.allocateHandler))
-
-	// creates a new file watcher for client certificate folder
-	watcher, _ := fsnotify.NewWatcher()
-	defer watcher.Close() // nolint: errcheck
-	if err := watcher.Add(certDir); err != nil {
-		logger.WithError(err).Fatalf("cannot watch folder %s for secret changes", certDir)
-	}
-
-	tlsCer, err := tls.LoadX509KeyPair(tlsDir+"tls.crt", tlsDir+"tls.key")
+	listener, err := net.Listen("tcp", fmt.Sprintf(":%s", sslPort))
 	if err != nil {
-		logger.WithError(err).Fatal("server TLS could not be loaded")
+		logger.WithError(err).Fatalf("failed to listen on TCP port %s", sslPort)
 	}
-	caCertPool := loadCACertPool()
 
-	// Watching for the events in certificate directory for updating certificates, when there is a change
-	go func() {
-		for {
-			select {
-			// watch for events
-			case event := <-watcher.Events:
-				h.certMutex.Lock()
-				caCertPool = loadCACertPool()
-				logger.Infof("Certificate directory change event %v", event)
-				h.certMutex.Unlock()
+	if !h.tlsDisabled {
+		watcherTLS, err := fsnotify.NewWatcher()
+		if err != nil {
+			logger.WithError(err).Fatal("could not create watcher for tls certs")
+		}
+		defer watcherTLS.Close() // nolint: errcheck
+		if err := watcherTLS.Add(tlsDir); err != nil {
+			logger.WithError(err).Fatalf("cannot watch folder %s for secret changes", tlsDir)
+		}
+
+		// Watching for the events in certificate directory for updating certificates, when there is a change
+		go func() {
+			for {
+				select {
+				// watch for events
+				case event := <-watcherTLS.Events:
+					tlsCert, err := readTLSCert()
+					if err != nil {
+						logger.WithError(err).Error("could not load TLS cert; keeping old one")
+					} else {
+						h.tlsMutex.Lock()
+						h.tlsCert = tlsCert
+						h.tlsMutex.Unlock()
+					}
+					logger.Infof("Tls directory change event %v", event)
 
 				// watch for errors
-			case err := <-watcher.Errors:
-				logger.WithError(err).Error("error watching for certificate directory")
+				case err := <-watcherTLS.Errors:
+					logger.WithError(err).Error("error watching for TLS directory")
+				}
 			}
+		}()
+
+		if !h.mTLSDisabled {
+			// creates a new file watcher for client certificate folder
+			watcher, err := fsnotify.NewWatcher()
+			if err != nil {
+				logger.WithError(err).Fatal("could not create watcher for client certs")
+			}
+			defer watcher.Close() // nolint: errcheck
+			if err := watcher.Add(certDir); err != nil {
+				logger.WithError(err).Fatalf("cannot watch folder %s for secret changes", certDir)
+			}
+
+			go func() {
+				for {
+					select {
+					// watch for events
+					case event := <-watcher.Events:
+						h.certMutex.Lock()
+						caCertPool, err := getCACertPool(certDir)
+						if err != nil {
+							logger.WithError(err).Error("could not load CA certs; keeping old ones")
+						} else {
+							h.caCertPool = caCertPool
+						}
+						logger.Infof("Certificate directory change event %v", event)
+						h.certMutex.Unlock()
+
+					// watch for errors
+					case err := <-watcher.Errors:
+						logger.WithError(err).Error("error watching for certificate directory")
+					}
+				}
+			}()
 		}
-	}()
-
-	cfg := &tls.Config{
-		Certificates: []tls.Certificate{tlsCer},
-		ClientAuth:   tls.RequireAndVerifyClientCert,
-		GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) {
-			h.certMutex.RLock()
-			defer h.certMutex.RUnlock()
-			return &tls.Config{
-				Certificates: []tls.Certificate{tlsCer},
-				ClientAuth:   tls.RequireAndVerifyClientCert,
-				ClientCAs:    caCertPool,
-			}, nil
-		},
 	}
 
-	srv := &http.Server{
-		Addr:      ":" + sslPort,
-		TLSConfig: cfg,
-		// add http OC metrics (opencensus.io/http/server/*)
-		Handler: &ochttp.Handler{
-			Handler: httpsMux,
-		},
-	}
+	opts := h.getServerOptions()
 
-	// listen on https to serve allocations
+	grpcServer := grpc.NewServer(opts...)
+	pb.RegisterAllocationServiceServer(grpcServer, h)
+
+	// serve GRPC for allocation
 	go func() {
-		// The certs are set on the config so passing empty as the cert path
-		err := srv.ListenAndServeTLS("", "")
+		err := grpcServer.Serve(listener)
 		logger.WithError(err).Fatal("allocation service crashed")
 		os.Exit(1)
 	}()
@@ -175,31 +182,25 @@ func main() {
 	logger.WithError(err).Fatal("allocation service crashed")
 }
 
-func loadCACertPool() *x509.CertPool {
-	caCertPool, err := getCACertPool(certDir)
-	if err != nil {
-		logger.WithError(err).Fatal("could not get CA certs")
-	}
-	return caCertPool
-}
-
-func newServiceHandler(kubeClient kubernetes.Interface, agonesClient versioned.Interface, health healthcheck.Handler) *httpHandler {
+func newServiceHandler(kubeClient kubernetes.Interface, agonesClient versioned.Interface, health healthcheck.Handler, mTLSDisabled bool, tlsDisabled bool) *serviceHandler {
 	defaultResync := 30 * time.Second
 	agonesInformerFactory := externalversions.NewSharedInformerFactory(agonesClient, defaultResync)
 	kubeInformerFactory := informers.NewSharedInformerFactory(kubeClient, defaultResync)
 	gsCounter := gameservers.NewPerNodeCounter(kubeInformerFactory, agonesInformerFactory)
 
 	allocator := gameserverallocations.NewAllocator(
-		agonesInformerFactory.Multicluster().V1alpha1().GameServerAllocationPolicies(),
+		agonesInformerFactory.Multicluster().V1().GameServerAllocationPolicies(),
 		kubeInformerFactory.Core().V1().Secrets(),
 		kubeClient,
 		gameserverallocations.NewReadyGameServerCache(agonesInformerFactory.Agones().V1().GameServers(), agonesClient.AgonesV1(), gsCounter, health))
 
 	stop := signals.NewStopChannel()
-	h := httpHandler{
+	h := serviceHandler{
 		allocationCallback: func(gsa *allocationv1.GameServerAllocation) (k8sruntime.Object, error) {
 			return allocator.Allocate(gsa, stop)
 		},
+		mTLSDisabled: mTLSDisabled,
+		tlsDisabled:  tlsDisabled,
 	}
 
 	kubeInformerFactory.Start(stop)
@@ -208,7 +209,102 @@ func newServiceHandler(kubeClient kubernetes.Interface, agonesClient versioned.I
 		logger.WithError(err).Fatal("starting allocator failed.")
 	}
 
+	if !h.tlsDisabled {
+		tlsCert, err := readTLSCert()
+		if err != nil {
+			logger.WithError(err).Fatal("could not load TLS certs.")
+		}
+		h.tlsMutex.Lock()
+		h.tlsCert = tlsCert
+		h.tlsMutex.Unlock()
+
+		if !h.mTLSDisabled {
+			caCertPool, err := getCACertPool(certDir)
+			if err != nil {
+				logger.WithError(err).Fatal("could not load CA certs.")
+			}
+			h.certMutex.Lock()
+			h.caCertPool = caCertPool
+			h.certMutex.Unlock()
+		}
+	}
+
 	return &h
+}
+
+func readTLSCert() (*tls.Certificate, error) {
+	tlsCert, err := tls.LoadX509KeyPair(tlsDir+"tls.crt", tlsDir+"tls.key")
+	if err != nil {
+		return nil, err
+	}
+	return &tlsCert, nil
+}
+
+// getServerOptions returns a list of GRPC server options.
+// Current options are TLS certs and opencensus stats handler.
+func (h *serviceHandler) getServerOptions() []grpc.ServerOption {
+	if h.tlsDisabled {
+		return []grpc.ServerOption{grpc.StatsHandler(&ocgrpc.ServerHandler{})}
+	}
+
+	cfg := &tls.Config{
+		GetCertificate: h.getTLSCert,
+	}
+
+	if !h.mTLSDisabled {
+		cfg.ClientAuth = tls.RequireAnyClientCert
+		cfg.VerifyPeerCertificate = h.verifyClientCertificate
+	}
+
+	// Add options for creds and  OpenCensus stats handler to enable stats and tracing.
+	// The keepalive options are useful for efficiency purposes (keeping a single connection alive
+	// instead of constantly recreating connections), when placing the Agones allocator behind load balancers.
+	return []grpc.ServerOption{
+		grpc.Creds(credentials.NewTLS(cfg)),
+		grpc.StatsHandler(&ocgrpc.ServerHandler{}),
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime:             1 * time.Minute,
+			PermitWithoutStream: true,
+		}),
+		grpc.KeepaliveParams(keepalive.ServerParameters{
+			MaxConnectionIdle: 5 * time.Minute,
+			Timeout:           10 * time.Minute,
+		}),
+	}
+}
+
+func (h *serviceHandler) getTLSCert(ch *tls.ClientHelloInfo) (*tls.Certificate, error) {
+	h.tlsMutex.RLock()
+	defer h.tlsMutex.RUnlock()
+	return h.tlsCert, nil
+}
+
+// verifyClientCertificate verifies that the client certificate is accepted
+// This method is used as GetConfigForClient is cross lang incompatible.
+func (h *serviceHandler) verifyClientCertificate(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+	opts := x509.VerifyOptions{
+		Roots:         h.caCertPool,
+		CurrentTime:   time.Now(),
+		Intermediates: x509.NewCertPool(),
+		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+
+	for _, cert := range rawCerts[1:] {
+		opts.Intermediates.AppendCertsFromPEM(cert)
+	}
+
+	c, err := x509.ParseCertificate(rawCerts[0])
+	if err != nil {
+		return errors.New("bad client certificate: " + err.Error())
+	}
+
+	h.certMutex.RLock()
+	defer h.certMutex.RUnlock()
+	_, err = c.Verify(opts)
+	if err != nil {
+		return errors.New("failed to verify client certificate: " + err.Error())
+	}
+	return nil
 }
 
 // Set up our client which we will use to call the API
@@ -249,7 +345,7 @@ func getCACertPool(path string) (*x509.CertPool, error) {
 		certFile := filepath.Join(path, file.Name())
 		caCert, err := ioutil.ReadFile(certFile)
 		if err != nil {
-			logger.Errorf("ca cert is not readable or missing: %s", err.Error())
+			logger.Errorf("CA cert is not readable or missing: %s", err.Error())
 			continue
 		}
 		if !caCertPool.AppendCertsFromPEM(caCert) {
@@ -262,144 +358,40 @@ func getCACertPool(path string) (*x509.CertPool, error) {
 	return caCertPool, nil
 }
 
-// Limit verbs the web server handles
-func (h *httpHandler) postOnly(in handler) handler {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "POST" {
-			in(w, r)
-			return
-		}
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-type httpHandler struct {
+type serviceHandler struct {
 	allocationCallback func(*allocationv1.GameServerAllocation) (k8sruntime.Object, error)
-	certMutex          sync.RWMutex
+
+	certMutex  sync.RWMutex
+	caCertPool *x509.CertPool
+
+	tlsMutex sync.RWMutex
+	tlsCert  *tls.Certificate
+
+	mTLSDisabled bool
+	tlsDisabled  bool
 }
 
-func (h *httpHandler) allocateHandler(w http.ResponseWriter, r *http.Request) {
-	request := pb.AllocationRequest{}
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-		http.Error(w, "invalid request", http.StatusBadRequest)
-		logger.WithError(err).Info("bad request")
-		return
-	}
-	logger.WithField("request", request).Infof("allocation request received")
-
-	gsa := converters.ConvertAllocationRequestV1Alpha1ToGSAV1(&request)
+// Allocate implements the Allocate gRPC method definition
+func (h *serviceHandler) Allocate(ctx context.Context, in *pb.AllocationRequest) (*pb.AllocationResponse, error) {
+	logger.WithField("request", in).Infof("allocation request received.")
+	gsa := converters.ConvertAllocationRequestToGSA(in)
 	resultObj, err := h.allocationCallback(gsa)
 	if err != nil {
-		http.Error(w, err.Error(), httpCode(err))
 		logger.WithField("gsa", gsa).WithError(err).Info("allocation failed")
-		return
+		return nil, err
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	if status, ok := resultObj.(*metav1.Status); ok {
-		w.WriteHeader(int(status.Code))
-		err = json.NewEncoder(w).Encode(status)
-		if err != nil {
-			http.Error(w, "internal server error", http.StatusInternalServerError)
-			logger.WithError(err).Error("Unable to encode status in json")
-			return
-		}
+	if s, ok := resultObj.(*metav1.Status); ok {
+		return nil, status.Errorf(codes.Code(s.Code), s.Message, resultObj)
 	}
+
 	allocatedGsa, ok := resultObj.(*allocationv1.GameServerAllocation)
 	if !ok {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
 		logger.Errorf("internal server error - Bad GSA format %v", resultObj)
-		return
+		return nil, status.Errorf(codes.Internal, "internal server error- Bad GSA format %v", resultObj)
 	}
-	response := converters.ConvertGSAV1ToAllocationResponseV1Alpha1(allocatedGsa)
-	logger.WithField("response", response).Infof("allocation response is being sent")
+	response, err := converters.ConvertGSAToAllocationResponse(allocatedGsa)
+	logger.WithField("response", response).WithError(err).Infof("allocation response is being sent")
 
-	err = json.NewEncoder(w).Encode(response)
-	if err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		logger.WithError(err).Error("Unable to encode status in json")
-		return
-	}
-}
-
-func httpCode(err error) int {
-	code := http.StatusInternalServerError
-	if t, ok := err.(k8serror.APIStatus); ok {
-		code = int(t.Status().Code)
-	}
-	return code
-}
-
-type config struct {
-	PrometheusMetrics bool
-	Stackdriver       bool
-	GCPProjectID      string
-	StackdriverLabels string
-}
-
-func parseEnvFlags() config {
-
-	viper.SetDefault(enablePrometheusMetricsFlag, true)
-	viper.SetDefault(enableStackdriverMetricsFlag, false)
-	viper.SetDefault(projectIDFlag, "")
-	viper.SetDefault(stackdriverLabels, "")
-
-	pflag.Bool(enablePrometheusMetricsFlag, viper.GetBool(enablePrometheusMetricsFlag), "Flag to activate metrics of Agones. Can also use PROMETHEUS_EXPORTER env variable.")
-	pflag.Bool(enableStackdriverMetricsFlag, viper.GetBool(enableStackdriverMetricsFlag), "Flag to activate stackdriver monitoring metrics for Agones. Can also use STACKDRIVER_EXPORTER env variable.")
-	pflag.String(projectIDFlag, viper.GetString(projectIDFlag), "GCP ProjectID used for Stackdriver, if not specified ProjectID from Application Default Credentials would be used. Can also use GCP_PROJECT_ID env variable.")
-	pflag.String(stackdriverLabels, viper.GetString(stackdriverLabels), "A set of default labels to add to all stackdriver metrics generated. By default metadata are automatically added using Kubernetes API and GCP metadata enpoint.")
-	runtime.FeaturesBindFlags()
-	pflag.Parse()
-
-	viper.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
-	runtime.Must(viper.BindEnv(enablePrometheusMetricsFlag))
-	runtime.Must(viper.BindEnv(enableStackdriverMetricsFlag))
-	runtime.Must(viper.BindEnv(projectIDFlag))
-	runtime.Must(viper.BindEnv(stackdriverLabels))
-	runtime.Must(viper.BindPFlags(pflag.CommandLine))
-	runtime.Must(runtime.FeaturesBindEnv())
-
-	runtime.Must(runtime.ParseFeaturesFromEnv())
-
-	return config{
-		PrometheusMetrics: viper.GetBool(enablePrometheusMetricsFlag),
-		Stackdriver:       viper.GetBool(enableStackdriverMetricsFlag),
-		GCPProjectID:      viper.GetString(projectIDFlag),
-		StackdriverLabels: viper.GetString(stackdriverLabels),
-	}
-}
-
-func registerMetricViews() {
-	if err := view.Register(ochttp.DefaultServerViews...); err != nil {
-		logger.WithError(err).Error("could not register view")
-	}
-}
-
-func setupMetricsRecorder(conf config) (health healthcheck.Handler, closer func()) {
-	health = healthcheck.NewHandler()
-	closer = func() {}
-
-	// Stackdriver metrics
-	if conf.Stackdriver {
-		sd, err := metrics.RegisterStackdriverExporter(conf.GCPProjectID, conf.StackdriverLabels)
-		if err != nil {
-			logger.WithError(err).Fatal("Could not register stackdriver exporter")
-		}
-		// It is imperative to invoke flush before your main function exits
-		closer = func() { sd.Flush() }
-	}
-
-	// Prometheus metrics
-	if conf.PrometheusMetrics {
-		registry := prom.NewRegistry()
-		metricHandler, err := metrics.RegisterPrometheusExporter(registry)
-		if err != nil {
-			logger.WithError(err).Fatal("Could not register prometheus exporter")
-		}
-		http.Handle("/metrics", metricHandler)
-		health = healthcheck.NewMetricsHandler(registry, "agones")
-	}
-
-	metrics.SetReportingPeriod(conf.PrometheusMetrics, conf.Stackdriver)
-	return
+	return response, err
 }

@@ -16,6 +16,20 @@ variable "machine_type" {
   default = "Standard_D2_v2"
 }
 
+variable "node_count" {
+  default = 4
+}
+
+variable "disk_size" {
+  default = 30
+}
+
 variable "cluster_name" {
   default = "test-cluster"
+}
+
+variable "client_id" {
+}
+
+variable "client_secret" {
 }

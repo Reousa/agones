@@ -17,6 +17,7 @@ package gameserverallocations
 import (
 	"context"
 	"io/ioutil"
+	"mime"
 	"net/http"
 	"time"
 
@@ -62,7 +63,7 @@ func NewController(apiServer *apiserver.APIServer,
 	c := &Controller{
 		api: apiServer,
 		allocator: NewAllocator(
-			agonesInformerFactory.Multicluster().V1alpha1().GameServerAllocationPolicies(),
+			agonesInformerFactory.Multicluster().V1().GameServerAllocationPolicies(),
 			kubeInformerFactory.Core().V1().Secrets(),
 			kubeClient,
 			NewReadyGameServerCache(agonesInformerFactory.Agones().V1().GameServers(), agonesClient.AgonesV1(), counter, health)),
@@ -175,7 +176,11 @@ func (c *Controller) allocationDeserialization(r *http.Request, namespace string
 	gsa.TypeMeta = metav1.TypeMeta{Kind: gvks[0].Kind, APIVersion: gvks[0].Version}
 
 	mediaTypes := scheme.Codecs.SupportedMediaTypes()
-	info, ok := k8sruntime.SerializerInfoForMediaType(mediaTypes, r.Header.Get("Content-Type"))
+	mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil {
+		return gsa, errors.Wrap(err, "error parsing mediatype from a request header")
+	}
+	info, ok := k8sruntime.SerializerInfoForMediaType(mediaTypes, mt)
 	if !ok {
 		return gsa, errors.New("Could not find deserializer")
 	}

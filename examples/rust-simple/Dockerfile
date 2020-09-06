@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM rust:1.36.0 as builder
+FROM rust:1.41.0 as builder
 RUN useradd -m build
 
 # Rust SDK depends on https://github.com/pingcap/grpc-rs and it requires CMake and Go
@@ -49,14 +49,12 @@ COPY Cargo.toml /home/builder/agones/examples/rust-simple/
 COPY Makefile /home/builder/agones/examples/rust-simple/
 
 WORKDIR /home/builder/agones/examples/rust-simple
-RUN make build
+RUN make build-server
 
-FROM debian:stretch
+FROM debian:buster
 RUN useradd -u 1000 -m server
 
-COPY --from=builder /home/builder/agones/examples/rust-simple/target/release/rust-simple /home/server/rust-simple
-RUN chown -R server /home/server && \
-    chmod o+x /home/server/rust-simple
+COPY --from=builder --chown=server:server /home/builder/agones/examples/rust-simple/target/release/rust-simple /home/server/rust-simple
 
 USER 1000
 ENTRYPOINT /home/server/rust-simple

@@ -28,7 +28,7 @@ REPOSITORY = gcr.io/agones-images
 # Directory that this Makefile is in.
 mkfile_path := $(abspath $(lastword $(MAKEFILE_LIST)))
 project_path := $(dir $(mkfile_path))
-server_tag = $(REPOSITORY)/nodejs-simple-server:0.3
+server_tag = $(REPOSITORY)/nodejs-simple-server:0.5
 root_path = $(realpath $(project_path)/../..)
 
 #   _____                    _
@@ -38,12 +38,12 @@ root_path = $(realpath $(project_path)/../..)
 #    |_|\__,_|_|  \__, |\___|\__|___/
 #                 |___/
 
-# build the cpp-simple binary
+# build the nodejs-simple binary
 build:
 	cd $(root_path) && docker build -f $(project_path)/Dockerfile --tag=$(server_tag) .
 
 run:
-	docker run --network=host $(server_tag)
+	docker run --network=host $(server_tag) $(args)
 
 # check if hosted on Google Cloud Registry
 gcr-check:

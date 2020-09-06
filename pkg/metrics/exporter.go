@@ -20,10 +20,10 @@ import (
 	"time"
 
 	"cloud.google.com/go/compute/metadata"
+	"contrib.go.opencensus.io/exporter/prometheus"
 	"contrib.go.opencensus.io/exporter/stackdriver"
 	"github.com/pkg/errors"
 	prom "github.com/prometheus/client_golang/prometheus"
-	"go.opencensus.io/exporter/prometheus"
 	"go.opencensus.io/stats/view"
 	"google.golang.org/genproto/googleapis/api/monitoredres"
 )
@@ -95,10 +95,6 @@ func SetReportingPeriod(forPrometheus, forStackdriver bool) {
 }
 
 func getMonitoredResource(projectID string) (*monitoredres.MonitoredResource, error) {
-	instanceID, err := metadata.InstanceID()
-	if err != nil {
-		return nil, errors.Wrap(err, "error getting instance ID")
-	}
 	zone, err := metadata.Zone()
 	if err != nil {
 		return nil, errors.Wrap(err, "error getting zone")
@@ -112,13 +108,12 @@ func getMonitoredResource(projectID string) (*monitoredres.MonitoredResource, er
 		Type: "k8s_container",
 		Labels: map[string]string{
 			"project_id":   projectID,
-			"instance_id":  instanceID,
-			"zone":         zone,
+			"location":     zone,
 			"cluster_name": clusterName,
 
 			// See: https://kubernetes.io/docs/tasks/inject-data-application/environment-variable-expose-pod-information/
-			"namespace_id":   os.Getenv("POD_NAMESPACE"),
-			"pod_id":         os.Getenv("POD_NAME"),
+			"namespace_name": os.Getenv("POD_NAMESPACE"),
+			"pod_name":       os.Getenv("POD_NAME"),
 			"container_name": os.Getenv("CONTAINER_NAME"),
 		},
 	}, nil

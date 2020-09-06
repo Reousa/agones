@@ -26,8 +26,8 @@ import (
 	fakeallocationv1 "agones.dev/agones/pkg/client/clientset/versioned/typed/allocation/v1/fake"
 	autoscalingv1 "agones.dev/agones/pkg/client/clientset/versioned/typed/autoscaling/v1"
 	fakeautoscalingv1 "agones.dev/agones/pkg/client/clientset/versioned/typed/autoscaling/v1/fake"
-	multiclusterv1alpha1 "agones.dev/agones/pkg/client/clientset/versioned/typed/multicluster/v1alpha1"
-	fakemulticlusterv1alpha1 "agones.dev/agones/pkg/client/clientset/versioned/typed/multicluster/v1alpha1/fake"
+	multiclusterv1 "agones.dev/agones/pkg/client/clientset/versioned/typed/multicluster/v1"
+	fakemulticlusterv1 "agones.dev/agones/pkg/client/clientset/versioned/typed/multicluster/v1/fake"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/discovery"
@@ -47,7 +47,7 @@ func NewSimpleClientset(objects ...runtime.Object) *Clientset {
 		}
 	}
 
-	cs := &Clientset{}
+	cs := &Clientset{tracker: o}
 	cs.discovery = &fakediscovery.FakeDiscovery{Fake: &cs.Fake}
 	cs.AddReactor("*", "*", testing.ObjectReaction(o))
 	cs.AddWatchReactor("*", func(action testing.Action) (handled bool, ret watch.Interface, err error) {
@@ -69,10 +69,15 @@ func NewSimpleClientset(objects ...runtime.Object) *Clientset {
 type Clientset struct {
 	testing.Fake
 	discovery *fakediscovery.FakeDiscovery
+	tracker   testing.ObjectTracker
 }
 
 func (c *Clientset) Discovery() discovery.DiscoveryInterface {
 	return c.discovery
+}
+
+func (c *Clientset) Tracker() testing.ObjectTracker {
+	return c.tracker
 }
 
 var _ clientset.Interface = &Clientset{}
@@ -82,18 +87,8 @@ func (c *Clientset) AgonesV1() agonesv1.AgonesV1Interface {
 	return &fakeagonesv1.FakeAgonesV1{Fake: &c.Fake}
 }
 
-// Agones retrieves the AgonesV1Client
-func (c *Clientset) Agones() agonesv1.AgonesV1Interface {
-	return &fakeagonesv1.FakeAgonesV1{Fake: &c.Fake}
-}
-
 // AllocationV1 retrieves the AllocationV1Client
 func (c *Clientset) AllocationV1() allocationv1.AllocationV1Interface {
-	return &fakeallocationv1.FakeAllocationV1{Fake: &c.Fake}
-}
-
-// Allocation retrieves the AllocationV1Client
-func (c *Clientset) Allocation() allocationv1.AllocationV1Interface {
 	return &fakeallocationv1.FakeAllocationV1{Fake: &c.Fake}
 }
 
@@ -102,17 +97,7 @@ func (c *Clientset) AutoscalingV1() autoscalingv1.AutoscalingV1Interface {
 	return &fakeautoscalingv1.FakeAutoscalingV1{Fake: &c.Fake}
 }
 
-// Autoscaling retrieves the AutoscalingV1Client
-func (c *Clientset) Autoscaling() autoscalingv1.AutoscalingV1Interface {
-	return &fakeautoscalingv1.FakeAutoscalingV1{Fake: &c.Fake}
-}
-
-// MulticlusterV1alpha1 retrieves the MulticlusterV1alpha1Client
-func (c *Clientset) MulticlusterV1alpha1() multiclusterv1alpha1.MulticlusterV1alpha1Interface {
-	return &fakemulticlusterv1alpha1.FakeMulticlusterV1alpha1{Fake: &c.Fake}
-}
-
-// Multicluster retrieves the MulticlusterV1alpha1Client
-func (c *Clientset) Multicluster() multiclusterv1alpha1.MulticlusterV1alpha1Interface {
-	return &fakemulticlusterv1alpha1.FakeMulticlusterV1alpha1{Fake: &c.Fake}
+// MulticlusterV1 retrieves the MulticlusterV1Client
+func (c *Clientset) MulticlusterV1() multiclusterv1.MulticlusterV1Interface {
+	return &fakemulticlusterv1.FakeMulticlusterV1{Fake: &c.Fake}
 }

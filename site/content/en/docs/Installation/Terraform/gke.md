@@ -78,15 +78,34 @@ The GKE cluster created from the example configuration will contain 3 Node Pools
 - `"agones-system"` node pool for Agones Controller.
 - `"agones-metrics"` for monitoring and metrics collecting purpose.
 
-Additionally, a `"tiller"` service account will be created with ClusterRole.
-
 Configurable parameters:
 
 - project - your Google Cloud Project ID (required)
 - name - the name of the GKE cluster (default is "agones-terraform-example")
-- agones_version - the version of agones to install (default is the latest version from the [Helm repository](https://agones.dev/chart/stable))
+- agones_version - the version of agones to install (an empty string, which is the default, is the latest version from the [Helm repository](https://agones.dev/chart/stable))
 - machine_type - machine type for hosting game servers (default is "n1-standard-4")
 - node_count - count of game server nodes for the default node pool (default is "4")
+- zone - the name of the [zone](https://cloud.google.com/compute/docs/regions-zones) you want your cluster to be
+  created in (default is "us-west1-c")
+- network - the name of the VPC network you want your cluster and firewall rules to be connected to (default is "default")
+{{% feature publishVersion="1.9.0" %}}
+- subnetwork - the name of the subnetwork in which the cluster's instances are launched. (required when using non default network)
+{{% /feature %}}
+- log_level - possible values: Fatal, Error, Warn, Info, Debug (default is "info")
+- feature_gates - a list of alpha and beta version features to enable. For example, "PlayerTracking=true&ContainerPortAllocation=true"
+- gameserver_minPort - the lower bound of the port range which gameservers will listen on (default is "7000")
+- gameserver_maxPort - the upper bound of the port range which gameservers will listen on (default is "8000")
+- gameserver_namespaces - a list of namespaces which will be used to run gameservers (default is `["default"]`). For example `["default", "xbox-gameservers", "mobile-gameservers"]`
+
+{{% alert title="Warning" color="warning"%}}
+On the lines that read `source = "git::https://github.com/googleforgames/agones.git//install/terraform/modules/gke/?ref=master"`
+make sure to change `?ref=master` to match your targeted Agones release, as Terraform modules can change between
+releases.
+
+For example, if you are targeting release {{< release-branch >}}, then you will want to have 
+`source = "git::https://github.com/googleforgames/agones.git//install/terraform/modules/gke/?ref=release-{{< release-branch >}}"`
+as your source.
+{{% /alert %}}
 
 ### Creating the cluster
 
@@ -95,17 +114,36 @@ In the directory where you created `module.tf`, run:
 terraform init
 ```
 
-This will cause terraform to clone the Agones repository and use the `./build` folder as starting point of Agones submodule, which contains all necessary Terraform configuration files.
+This will cause terraform to clone the Agones repository and use the `./install/terraform` folder as a starting point of
+Agones submodule, which contains all necessary Terraform configuration files.
 
-Next make sure that you can authenticate using gcloud:
+Next, make sure that you can authenticate using gcloud:
 ```
 gcloud auth application-default login
 ```
-
+{{% feature expiryVersion="1.9.0" %}}
 Now you can create your GKE cluster (optionally specifying the version of Agones you want to use):
 ```
-terraform apply -var project="<YOUR_GCP_ProjectID>" [-var agones_version="1.0.0"]
+terraform apply -var project="<YOUR_GCP_ProjectID>"
 ```
+{{% /feature %}}
+
+{{% feature publishVersion="1.9.0" %}}
+#### Option 1: Creating the cluster in the default VPC
+To create your GKE cluster in the default VPC just specify the project variable.
+
+```
+terraform apply -var project="<YOUR_GCP_ProjectID>"
+```
+
+#### Option 2: Creating the cluster in a custom VPC
+To create the cluster in a custom VPC you must specify the project, network and subnetwork variables.
+
+```
+terraform apply -var project="<YOUR_GCP_ProjectID>" -var network="<YOUR_NETWORK_NAME>" -var subnetwork="<YOUR_SUBNETWORK_NAME>"
+```
+{{% /feature %}}
+
 
 To verify that the cluster was created successfully, set up your kubectl credentials:
 ```
@@ -123,7 +161,7 @@ You should have 6 nodes in `Ready` state.
 
 To delete all resources provisioned by Terraform:
 ```
-terraform destroy
+terraform destroy -var project="<YOUR_GCP_ProjectID>"
 ```
 
 ## Next Steps

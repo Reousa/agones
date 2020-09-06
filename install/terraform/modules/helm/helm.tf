@@ -12,6 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+#
+# This is a Helm 2.x module.
+# Please upgrade to the helm3 module, as this one will not be actively updated.
+#
+
 resource "kubernetes_service_account" "tiller" {
   metadata {
     name      = "tiller"
@@ -40,15 +45,15 @@ resource "kubernetes_cluster_role_binding" "tiller" {
     namespace = "kube-system"
   }
 
-  depends_on = ["kubernetes_service_account.tiller"]
+  depends_on = [kubernetes_service_account.tiller]
 }
 
 provider "kubernetes" {
-  version                = "~> 1.5"
+  version                = "~> 1.5, <=1.10"
   load_config_file       = false
-  host                   = "${var.host}"
-  token                  = "${var.token}"
-  cluster_ca_certificate = "${var.cluster_ca_certificate}"
+  host                   = var.host
+  token                  = var.token
+  cluster_ca_certificate = var.cluster_ca_certificate
 }
 
 provider "helm" {
@@ -56,14 +61,14 @@ provider "helm" {
 
   debug           = true
   install_tiller  = true
-  service_account = "${kubernetes_service_account.tiller.metadata.0.name}"
+  service_account = kubernetes_service_account.tiller.metadata.0.name
   tiller_image    = "gcr.io/kubernetes-helm/tiller:v2.14.2"
 
   kubernetes {
     load_config_file       = false
-    host                   = "${var.host}"
-    token                  = "${var.token}"
-    cluster_ca_certificate = "${var.cluster_ca_certificate}"
+    host                   = var.host
+    token                  = var.token
+    cluster_ca_certificate = var.cluster_ca_certificate
   }
 }
 
@@ -72,7 +77,7 @@ data "helm_repository" "agones" {
   name = "agones"
   url  = "https://agones.dev/chart/stable"
 
-  depends_on = ["kubernetes_cluster_role_binding.tiller"]
+  depends_on = [kubernetes_cluster_role_binding.tiller]
 }
 
 locals {
@@ -81,11 +86,12 @@ locals {
   tag_name = "${var.agones_version != "" ? "agones.image.tag" : "skip"}"
 }
 
+
 resource "helm_release" "agones" {
   name         = "agones"
   force_update = "true"
-  repository   = "${data.helm_repository.agones.metadata.0.name}"
-  chart        = "${var.chart}"
+  repository   = data.helm_repository.agones.metadata.0.name
+  chart        = var.chart
   timeout      = 420
 
   # Use terraform of the latest >=0.12 version
@@ -95,53 +101,78 @@ resource "helm_release" "agones" {
 
   set {
     name  = "crds.CleanupOnDelete"
-    value = "${var.crd_cleanup}"
+    value = var.crd_cleanup
   }
 
   set {
-    name  = "${local.tag_name}"
-    value = "${var.agones_version}"
+    name  = local.tag_name
+    value = var.agones_version
   }
 
   set {
     name  = "agones.image.registry"
-    value = "${var.image_registry}"
+    value = var.image_registry
   }
 
   set {
     name  = "agones.image.controller.pullPolicy"
-    value = "${var.pull_policy}"
+    value = var.pull_policy
   }
 
   set {
     name  = "agones.image.sdk.alwaysPull"
-    value = "${var.always_pull_sidecar}"
+    value = var.always_pull_sidecar
   }
 
   set {
     name  = "agones.image.controller.pullSecret"
-    value = "${var.image_pull_secret}"
+    value = var.image_pull_secret
   }
 
   set {
     name  = "agones.ping.http.serviceType"
-    value = "${var.ping_service_type}"
+    value = var.ping_service_type
   }
 
   set {
-    name = "agones.ping.udp.expose"
-    value ="${var.udp_expose}"
+    name  = "agones.ping.udp.expose"
+    value = var.udp_expose
   }
 
   set {
     name  = "agones.ping.udp.serviceType"
-    value = "${var.ping_service_type}"
+    value = var.ping_service_type
   }
 
-  version   = "${var.agones_version}"
+  set {
+    name  = "agones.controller.logLevel"
+    value = var.log_level
+  }
+  
+  set {
+    name  = "agones.featureGates"
+    value = var.feature_gates
+  }
+
+  set {
+    name  = "gameservers.namespaces"
+    value = var.gameserver_namespaces
+  }
+
+  set {
+    name  = "gameservers.minPort"
+    value = var.gameserver_minPort
+  }
+
+  set {
+    name  = "gameservers.maxPort"
+    value = var.gameserver_maxPort
+  }
+
+  version   = var.agones_version
   namespace = "agones-system"
 
-  depends_on = ["null_resource.helm_init", "kubernetes_cluster_role_binding.tiller"]
+  depends_on = [null_resource.helm_init, kubernetes_cluster_role_binding.tiller]
 }
 
 provider "null" {

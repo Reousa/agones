@@ -37,6 +37,14 @@ steps:
   waitFor: ['-']
 
 - name: gcr.io/$PROJECT_ID/restore_cache
+  id: cpp-sdk-conformance-restore-cache
+  args:
+    - '--bucket=gs://$_CACHE_BUCKET'
+    - '--key=$_CPP_SDK_CONFORMANCE_CACHE_KEY-$( checksum sdks/cpp/cmake/prerequisites.cmake )'
+  waitFor: ['-']
+
+
+- name: gcr.io/$PROJECT_ID/restore_cache
   id: rust-sdk-build-restore-cache
   args:
     - '--bucket=gs://$_CACHE_BUCKET'
@@ -181,6 +189,7 @@ steps:
     - lint
     - ensure-build-sdk-image-base
     - htmltest-restore-cache
+    - build-sdks
   dir: "build"
   args: [ "-j", "5", "--output-sync=target", "test" ]
 
@@ -208,25 +217,34 @@ steps:
     - tests
   dir: "build"
   args: ["site-static-preview", "site-gen-app-yaml", "SERVICE=preview"]
-- name: "ubuntu" # fake a new gopath
-  id: site-gopath
-  waitFor:
-    - site-static
-  args: ["bash", "-c", "mkdir -p ./go/src && mv ./site ./go/src && cp -r ./vendor/gopkg.in ./go/src && ls -a ./go/src/site"]
 - name: "gcr.io/cloud-builders/gcloud" # deploy the preview of the website
   id: "deploy-site-static"
   waitFor:
-    - site-gopath
-  dir: "go/src/site"
+    - site-static
+  dir: "site"
   args: ["app", "deploy", ".app.yaml", "--no-promote", "--version=$SHORT_SHA"]
   env:
     - GOPATH=/workspace/go
+    - GO111MODULE=on
 
 #
-# Run the e2e tests
+# Run the e2e tests with FeatureGates inverted compared to Stable
 #
 
 - name: 'e2e-runner'
+  args: ['PlayerTracking=true&ContainerPortAllocation=false&SDKWatchSendOnExecute=true', 'e2e-test-cluster']
+  id: e2e-feature-gates
+  waitFor:
+    - push-images
+    - build-e2e
+
+#
+# Run the e2e tests without FeatureGates
+#
+
+- name: 'e2e-runner'
+  args: ['', 'e2e-test-cluster']
+  id: e2e-stable
   waitFor:
     - push-images
     - build-e2e
@@ -238,9 +256,22 @@ steps:
 - name: "make-docker"
   id: sdk-conformance
   dir: "build"
-  args: [ "-j", "4", "--output-sync=target", "run-sdk-conformance-tests"]
+  args: [ "-j", "5", "--output-sync=target", "run-sdk-conformance-tests"]
   waitFor:
     - build-images
+
+#
+# Cache the CPP conformance build directory, to speed up subsequent builds (considerably)
+#
+
+- name: 'gcr.io/$PROJECT_ID/save_cache'
+  args:
+    - '--bucket=gs://$_CACHE_BUCKET'
+    - '--key=$_CPP_SDK_CONFORMANCE_CACHE_KEY-$( checksum sdks/cpp/cmake/prerequisites.cmake )'
+    - '--path=test/sdk/cpp/sdk'
+  id: cpp-sdk-conformance-save-cache
+  waitFor:
+    - sdk-conformance
 
 #
 # Cache the Rust SDK build directory, to speed up subsequent builds (considerably)
@@ -278,11 +309,12 @@ substitutions:
   _CACHE_BUCKET: agones-build-cache
   _HTMLTEST_CACHE_KEY: htmltest-0.10.1
   _CPP_SDK_BUILD_CACHE_KEY: cpp-sdk-build
+  _CPP_SDK_CONFORMANCE_CACHE_KEY: cpp-sdk-conformance
   _RUST_SDK_BUILD_CACHE_KEY: rust-sdk-build
 
 tags: ['ci']
-timeout: "1h"
+timeout: "2h"
 images: ['gcr.io/$PROJECT_ID/agones-controller', 'gcr.io/$PROJECT_ID/agones-sdk', 'gcr.io/$PROJECT_ID/agones-ping']
 logsBucket: "gs://agones-build-logs"
 options:
- machineType: 'N1_HIGHCPU_8'
+ machineType: 'N1_HIGHCPU_32'

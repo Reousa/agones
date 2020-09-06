@@ -49,9 +49,8 @@ Follow the [Stackdriver Installation steps](#stackdriver-installation) to see yo
 | Name                                            | Description                                                         | Type      |
 |-------------------------------------------------|---------------------------------------------------------------------|-----------|
 | agones_gameservers_count                        | The number of gameservers per fleet and status                      | gauge     |
-| agones_fleet_allocations_count                  | The number of fleet allocations per fleet                           | gauge     |
+| agones_gameserver_allocations_duration_seconds  | The distribution of gameserver allocation requests latencies         | histogram     |
 | agones_gameservers_total                        | The total of gameservers per fleet and status                       | counter   |
-| agones_fleet_allocations_total                  | The total of fleet allocations per fleet                            | counter   |
 | agones_fleets_replicas_count                    | The number of replicas per fleet (total, desired, ready, allocated) | gauge     |
 | agones_fleet_autoscalers_able_to_scale          | The fleet autoscaler can access the fleet to scale                  | gauge     |
 | agones_fleet_autoscalers_buffer_limits          | The limits of buffer based fleet autoscalers (min, max)              | gauge     |
@@ -61,6 +60,21 @@ Follow the [Stackdriver Installation steps](#stackdriver-installation) to see yo
 | agones_fleet_autoscalers_limited                | The fleet autoscaler is capped (1)                                  | gauge     |
 | agones_gameservers_node_count                   | The distribution of gameservers per node                            | histogram |
 | agones_nodes_count                              | The count of nodes empty and with gameservers                       | gauge     |
+| agones_gameservers_state_duration  | The distribution of gameserver state duration in seconds. Note: this metric could have some missing samples by design. Do not use the `_total` counter as the real value for state changes.     | histogram     |
+| agones_k8s_client_http_request_total            | The total of HTTP requests to the Kubernetes API by status code       | counter   |
+| agones_k8s_client_http_request_duration_seconds | The distribution of HTTP requests latencies to the Kubernetes API by status code  | histogram   |
+| agones_k8s_client_cache_list_total              | The total number of list operations for client-go caches                         | counter   |
+| agones_k8s_client_cache_list_duration_seconds   | Duration of a Kubernetes list API call in seconds                        | histogram   |
+| agones_k8s_client_cache_list_items              | Count of items in a list from the Kubernetes API                            | histogram   |
+| agones_k8s_client_cache_watches_total           | The total number of watch operations for client-go caches                         | counter   |
+| agones_k8s_client_cache_last_resource_version   | Last resource version from the Kubernetes API                            | gauge   |
+| agones_k8s_client_workqueue_depth               | Current depth of the work queue                          | gauge   |
+| agones_k8s_client_workqueue_latency_seconds     | How long an item stays in the work queue                          | histogram   |
+| agones_k8s_client_workqueue_items_total         | Total number of items added to the work queue                          | counter   |
+| agones_k8s_client_workqueue_work_duration_seconds | How long processing an item from the work queue takes                          | histogram   |
+| agones_k8s_client_workqueue_retries_total         | Total number of items retried to the work queue                          | counter   |
+| agones_k8s_client_workqueue_longest_running_processor         | How long the longest running workqueue processor has been running in microseconds  | gauge   |
+| agones_k8s_client_workqueue_unfinished_work_seconds         | How long unfinished work has been sitting in the workqueue in seconds    | gauge   |
 
 ## Dashboard
 
@@ -70,9 +84,11 @@ We provide a set of useful [Grafana](https://grafana.com/) dashboards to monitor
 
 - {{< ghlink href="/build/grafana/dashboard-autoscalers.yaml" branch="master" >}}Agones Autoscalers{{< /ghlink >}} allows you to monitor your current autoscalers replicas request as well as fleet replicas allocation and readyness statuses. You can only select one autoscaler at the time using the provided dropdown.
 
-- {{< ghlink href="/build/grafana/dashboard-gameservers.yaml" branch="master" >}}Agones GameServers{{< /ghlink >}} displays your current game servers workload status (allocations , game servers statuses, fleets replicas) with optional fleet name filtering.
+- {{< ghlink href="/build/grafana/dashboard-gameservers.yaml" branch="master" >}}Agones GameServers{{< /ghlink >}} displays your current game servers workload status (allocations, game servers statuses, fleets replicas) with optional fleet name filtering.
 
 - {{< ghlink href="/build/grafana/dashboard-allocations.yaml" branch="master" >}}Agones GameServer Allocations{{< /ghlink >}} displays Agones gameservers allocations rates and counts per fleet.
+
+- {{< ghlink href="/build/grafana/dashboard-allocator-usage.yaml" branch="master" >}}Agones Allocator Resource{{< /ghlink >}} displays Agones Allocators CPU, memory usage and also some useful Golang runtime metrics.
 
 - {{< ghlink href="/build/grafana/dashboard-status.yaml" branch="master" >}}Agones Status{{< /ghlink >}} displays Agones controller health status.
 
@@ -126,7 +142,7 @@ For resiliency it is recommended to run Prometheus on a dedicated node which is 
 are scheduled. If you use the above command, with our {{< ghlink href="/build/prometheus.yaml" branch="master" >}}prometheus.yaml{{< /ghlink >}} to set up Prometheus, it will schedule Prometheus pods on nodes
 tainted with `agones.dev/agones-metrics=true:NoExecute` and labeled with `agones.dev/agones-metrics=true` if available.
 
-As an example, to set up dedicated node pool for Prometheus on GKE, run the following command before installing Prometheus. Alternatively you can taint and label nodes manually.
+As an example, to set up a dedicated node pool for Prometheus on GKE, run the following command before installing Prometheus. Alternatively you can taint and label nodes manually.
 
 ```
 gcloud container node-pools create agones-metrics --cluster=... --zone=... \
@@ -164,19 +180,19 @@ Now let's install some Grafana dashboards.
 
 ### Grafana installation
 
-Grafana is a open source time series analytics platform which supports Prometheus data source. We can also install easily import pre-built dashboards.
+Grafana is a open source time series analytics platform which supports Prometheus data source. We can also easily import pre-built dashboards.
 
 First we will install [Agones dashboard](#grafana-dashboards) as [config maps](https://kubernetes.io/docs/tasks/configure-pod-container/configure-pod-configmap/) in our cluster.
 
 ```bash
-kubectl apply -f ../build/grafana/
+kubectl apply -f ./build/grafana/
 ```
 
 Now we can install [grafana chart](https://github.com/helm/charts/tree/master/stable/grafana) from stable repository. (Replace `<your-admin-password>` with the admin password of your choice)
 
 ```bash
-helm install --wait --name grafana stable/grafana --namespace metrics \
-  --set adminPassword=<your-admin-password> -f ../build/grafana.yaml
+helm install --wait --name grafana stable/grafana --version=5.0.13 --namespace metrics \
+  --set adminPassword=<your-admin-password> -f ./build/grafana.yaml
 ```
 
 This will install Grafana with our prepopulated dashboards and prometheus datasource [previously installed](#prometheus-installation)
@@ -205,14 +221,14 @@ Note that Stackdriver monitoring is enabled by default on GKE clusters, however 
 
 Default metrics exporter is Prometheus. If you are using the [Helm installation]({{< ref "/docs/Installation/Install Agones/helm.md" >}}), you can install or upgrade Agones to use Stackdriver, using the following chart parameters:
 ```
-helm upgrade --install --wait --set agones.metrics.stackdriverEnabled=true --set agones.metrics.prometheusEnabled=false --set agones.metrics.prometheusServiceDiscovery=false my-release-name agones/agones
+helm upgrade --install --wait --set agones.metrics.stackdriverEnabled=true --set agones.metrics.prometheusEnabled=false --set agones.metrics.prometheusServiceDiscovery=false my-release-name agones/agones --namespace=agones-system
 ```
 
 With this configuration only Stackdriver exporter would be used instead of Prometheus exporter.
 
 Create a Fleet or a Gameserver in order to check that connection with stackdriver API is configured properly and so that you will be able to see the metrics data.
 
-Visit [Stackdriver monitoring](https://app.google.stackdriver.com) website, select your project, or choose `Create a new Workspace` and select GCP project where your cluster resides. In [Stackdriver metrics explorer](https://cloud.google.com/monitoring/charts/metrics-explorer) you should be able to find new metrics with prefix `agones/` (resource type is `Global`) after a couple of minutes. Choose the metrics you are interested in and add to a single or separate graphs. You can create multiple graphs, save them into your dashboard and use various aggregation parameters and reducers for each graph.
+Visit [Stackdriver monitoring](https://app.google.stackdriver.com) website, select your project, or choose `Create a new Workspace` and select GCP project where your cluster resides. In [Stackdriver metrics explorer](https://cloud.google.com/monitoring/charts/metrics-explorer) you should be able to find new metrics with prefix `agones/` after a couple of minutes. Choose the metrics you are interested in and add to a single or separate graphs. Select `Kubernetes Container` resource type for each of them. You can create multiple graphs, save them into your dashboard and use various aggregation parameters and reducers for each graph.
 
 Example of the dashboard appearance is provided below:
 

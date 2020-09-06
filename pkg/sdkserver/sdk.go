@@ -17,6 +17,7 @@ package sdkserver
 import (
 	agonesv1 "agones.dev/agones/pkg/apis/agones/v1"
 	"agones.dev/agones/pkg/sdk"
+	"agones.dev/agones/pkg/util/runtime"
 )
 
 const (
@@ -64,6 +65,16 @@ func convert(gs *agonesv1.GameServer) *sdk.GameServer {
 			Port: p.Port,
 		}
 		result.Status.Ports = append(result.Status.Ports, grpcPort)
+	}
+
+	if runtime.FeatureEnabled(runtime.FeaturePlayerTracking) {
+		if gs.Status.Players != nil {
+			result.Status.Players = &sdk.GameServer_Status_PlayerStatus{
+				Count:    gs.Status.Players.Count,
+				Capacity: gs.Status.Players.Capacity,
+				Ids:      gs.Status.Players.IDs,
+			}
+		}
 	}
 
 	return result

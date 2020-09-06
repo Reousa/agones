@@ -19,10 +19,10 @@ Kubernetes documentation for more details on "requests" and "limits" to both CPU
 
 ## GameServers
 
-Since the `GameServer` specification provides a full [`PodSpecTemplate`](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.10/#podtemplatespec-v1-core),
+Since the `GameServer` specification provides a full [`PodSpecTemplate`](https://v1-15.docs.kubernetes.io/docs/reference/generated/kubernetes-api/v1.15/#podtemplatespec-v1-core),
 we can take advantage of both resource limits and requests in our `GameServer` configurations. 
 
-For example, to set a CPU limit on our `GameServer` configuration of 250m/0.25 of a cpu, 
+For example, to set a CPU limit on our `GameServer` configuration of `250m/0.25` of a CPU,
 we could do so as followed:
 
 ```yaml
@@ -44,7 +44,7 @@ spec:
             cpu: "250m" #this is our limit here
 ```
 
-If you do not set a limit or request, the default is set my Kubernetes at a 100m CPU request. 
+If you do not set a limit or request, the default is set by Kubernetes at a 100m CPU request. 
 
 ## SDK GameServer sidecar
 

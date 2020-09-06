@@ -18,21 +18,29 @@ package framework
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"net"
+	"os"
+	"os/user"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
-
-	"github.com/stretchr/testify/assert"
 
 	agonesv1 "agones.dev/agones/pkg/apis/agones/v1"
 	allocationv1 "agones.dev/agones/pkg/apis/allocation/v1"
 	autoscaling "agones.dev/agones/pkg/apis/autoscaling/v1"
 	"agones.dev/agones/pkg/client/clientset/versioned"
+	"agones.dev/agones/pkg/util/runtime"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+	"github.com/spf13/pflag"
+	"github.com/spf13/viper"
+	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	types "k8s.io/apimachinery/pkg/types"
@@ -50,6 +58,10 @@ const (
 	AutoCleanupLabelValue = "true"
 )
 
+// NamespaceLabel is the label that is put on all namespaces that are created
+// for e2e tests.
+var NamespaceLabel = map[string]string{"owner": "e2e-test"}
+
 // Framework is a testing framework
 type Framework struct {
 	KubeClient      kubernetes.Interface
@@ -58,13 +70,32 @@ type Framework struct {
 	PullSecret      string
 	StressTestLevel int
 	PerfOutputDir   string
+	Version         string
+	Namespace       string
 }
 
 // New setups a testing framework using a kubeconfig path and the game server image to use for testing.
 func New(kubeconfig string) (*Framework, error) {
+	return newFramework(kubeconfig, 0, 0)
+}
+
+// NewWithRates setups a testing framework using a kubeconfig path and the game server image
+// to use for load testing with QPS and Burst overwrites.
+func NewWithRates(kubeconfig string, qps float32, burst int) (*Framework, error) {
+	return newFramework(kubeconfig, qps, burst)
+}
+
+func newFramework(kubeconfig string, qps float32, burst int) (*Framework, error) {
 	config, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
 	if err != nil {
 		return nil, errors.Wrap(err, "build config from flags failed")
+	}
+
+	if qps > 0 {
+		config.QPS = qps
+	}
+	if burst > 0 {
+		config.Burst = burst
 	}
 
 	kubeClient, err := kubernetes.NewForConfig(config)
@@ -83,6 +114,98 @@ func New(kubeconfig string) (*Framework, error) {
 	}, nil
 }
 
+const (
+	kubeconfigFlag      = "kubeconfig"
+	gsimageFlag         = "gameserver-image"
+	pullSecretFlag      = "pullsecret"
+	stressTestLevelFlag = "stress"
+	perfOutputDirFlag   = "perf-output"
+	versionFlag         = "version"
+	namespaceFlag       = "namespace"
+)
+
+// ParseTestFlags Parses go test flags separately because pflag package ignores flags with '-test.' prefix
+// Related issues:
+// https://github.com/spf13/pflag/issues/63
+// https://github.com/spf13/pflag/issues/238
+func ParseTestFlags() error {
+	// if we have a "___" in the arguments path, then this is IntelliJ running the test, so ignore this, as otherwise
+	// it breaks.
+	if strings.Contains(os.Args[0], "___") {
+		logrus.Info("Running test via Intellij. Skipping Test Flag Parsing")
+		return nil
+	}
+
+	var testFlags []string
+	for _, f := range os.Args[1:] {
+		if strings.HasPrefix(f, "-test.") {
+			testFlags = append(testFlags, f)
+		}
+	}
+	return flag.CommandLine.Parse(testFlags)
+}
+
+// NewFromFlags sets up the testing framework with the standard command line flags.
+func NewFromFlags() (*Framework, error) {
+	usr, err := user.Current()
+	if err != nil {
+		return nil, err
+	}
+
+	viper.SetDefault(kubeconfigFlag, filepath.Join(usr.HomeDir, ".kube", "config"))
+	viper.SetDefault(gsimageFlag, "gcr.io/agones-images/udp-server:0.21")
+	viper.SetDefault(pullSecretFlag, "")
+	viper.SetDefault(stressTestLevelFlag, 0)
+	viper.SetDefault(perfOutputDirFlag, "")
+	viper.SetDefault(versionFlag, "")
+	viper.SetDefault(runtime.FeatureGateFlag, "")
+	viper.SetDefault(namespaceFlag, "")
+
+	pflag.String(kubeconfigFlag, viper.GetString(kubeconfigFlag), "kube config path, e.g. $HOME/.kube/config")
+	pflag.String(gsimageFlag, viper.GetString(gsimageFlag), "gameserver image to use for those tests, gcr.io/agones-images/udp-server:0.21")
+	pflag.String(pullSecretFlag, viper.GetString(pullSecretFlag), "optional secret to be used for pulling the gameserver and/or Agones SDK sidecar images")
+	pflag.Int(stressTestLevelFlag, viper.GetInt(stressTestLevelFlag), "enable stress test at given level 0-100")
+	pflag.String(perfOutputDirFlag, viper.GetString(perfOutputDirFlag), "write performance statistics to the specified directory")
+	pflag.String(versionFlag, viper.GetString(versionFlag), "agones controller version to be tested, consists of release version plus a short hash of the latest commit")
+	pflag.String(namespaceFlag, viper.GetString(namespaceFlag), "namespace is used to isolate test runs to their own namespaces")
+	runtime.FeaturesBindFlags()
+	pflag.Parse()
+
+	viper.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
+	runtime.Must(viper.BindEnv(kubeconfigFlag))
+	runtime.Must(viper.BindEnv(gsimageFlag))
+	runtime.Must(viper.BindEnv(pullSecretFlag))
+	runtime.Must(viper.BindEnv(stressTestLevelFlag))
+	runtime.Must(viper.BindEnv(perfOutputDirFlag))
+	runtime.Must(viper.BindEnv(versionFlag))
+	runtime.Must(viper.BindEnv(namespaceFlag))
+	runtime.Must(viper.BindPFlags(pflag.CommandLine))
+	runtime.Must(runtime.FeaturesBindEnv())
+	runtime.Must(runtime.ParseFeaturesFromEnv())
+
+	framework, err := New(viper.GetString(kubeconfigFlag))
+	if err != nil {
+		return framework, err
+	}
+	framework.GameServerImage = viper.GetString(gsimageFlag)
+	framework.PullSecret = viper.GetString(pullSecretFlag)
+	framework.StressTestLevel = viper.GetInt(stressTestLevelFlag)
+	framework.PerfOutputDir = viper.GetString(perfOutputDirFlag)
+	framework.Version = viper.GetString(versionFlag)
+	framework.Namespace = viper.GetString(namespaceFlag)
+
+	logrus.WithField("gameServerImage", framework.GameServerImage).
+		WithField("pullSecret", framework.PullSecret).
+		WithField("stressTestLevel", framework.StressTestLevel).
+		WithField("perfOutputDir", framework.PerfOutputDir).
+		WithField("version", framework.Version).
+		WithField("namespace", framework.Namespace).
+		WithField("featureGates", runtime.EncodeFeatures()).
+		Info("Starting e2e test(s)")
+
+	return framework, nil
+}
+
 // CreateGameServerAndWaitUntilReady Creates a GameServer and wait for its state to become ready.
 func (f *Framework) CreateGameServerAndWaitUntilReady(ns string, gs *agonesv1.GameServer) (*agonesv1.GameServer, error) {
 	newGs, err := f.AgonesClient.AgonesV1().GameServers(ns).Create(gs)
@@ -90,7 +213,7 @@ func (f *Framework) CreateGameServerAndWaitUntilReady(ns string, gs *agonesv1.Ga
 		return nil, fmt.Errorf("creating %v GameServer instances failed (%v): %v", gs.Spec, gs.Name, err)
 	}
 
-	logrus.WithField("name", newGs.ObjectMeta.Name).Info("GameServer created, waiting for Ready")
+	logrus.WithField("gs", newGs.ObjectMeta.Name).Info("GameServer created, waiting for Ready")
 
 	readyGs, err := f.WaitForGameServerState(newGs, agonesv1.GameServerStateReady, 5*time.Minute)
 
@@ -102,34 +225,44 @@ func (f *Framework) CreateGameServerAndWaitUntilReady(ns string, gs *agonesv1.Ga
 		return nil, fmt.Errorf("Ready GameServer instance has no port: %v", readyGs.Status)
 	}
 
-	logrus.WithField("name", newGs.ObjectMeta.Name).Info("GameServer Ready")
+	logrus.WithField("gs", newGs.ObjectMeta.Name).Info("GameServer Ready")
 
 	return readyGs, nil
 }
 
-// WaitForGameServerState Waits untils the gameserver reach a given state before the timeout expires
-func (f *Framework) WaitForGameServerState(gs *agonesv1.GameServer, state agonesv1.GameServerState,
-	timeout time.Duration) (*agonesv1.GameServer, error) {
-	var readyGs *agonesv1.GameServer
+// WaitForGameServerStateWithLogger Waits untils the gameserver reach a given state before the timeout expires, and logs against
+// a give logger (usually useful to log the name of the test with the checks)
+func (f *Framework) WaitForGameServerStateWithLogger(logger *logrus.Entry, gs *agonesv1.GameServer, state agonesv1.GameServerState, timeout time.Duration) (*agonesv1.GameServer, error) {
+	var checkGs *agonesv1.GameServer
 
-	err := wait.PollImmediate(2*time.Second, timeout, func() (bool, error) {
+	err := wait.PollImmediate(1*time.Second, timeout, func() (bool, error) {
 		var err error
-		readyGs, err = f.AgonesClient.AgonesV1().GameServers(gs.Namespace).Get(gs.Name, metav1.GetOptions{})
+		checkGs, err = f.AgonesClient.AgonesV1().GameServers(gs.Namespace).Get(gs.Name, metav1.GetOptions{})
 
 		if err != nil {
 			logrus.WithError(err).Warn("error retrieving gameserver")
 			return false, nil
 		}
 
-		if readyGs.Status.State == state {
+		logger.WithField("gs", checkGs.ObjectMeta.Name).
+			WithField("currentState", checkGs.Status.State).
+			WithField("awaitingState", state).Info("Waiting for states to match")
+
+		if checkGs.Status.State == state {
 			return true, nil
 		}
 
 		return false, nil
 	})
 
-	return readyGs, errors.Wrapf(err, "waiting for GameServer to be %v %v/%v",
+	return checkGs, errors.Wrapf(err, "waiting for GameServer to be %v %v/%v",
 		state, gs.Namespace, gs.Name)
+}
+
+// WaitForGameServerState Waits untils the gameserver reach a given state before the timeout expires (with a default logger)
+func (f *Framework) WaitForGameServerState(gs *agonesv1.GameServer, state agonesv1.GameServerState,
+	timeout time.Duration) (*agonesv1.GameServer, error) {
+	return f.WaitForGameServerStateWithLogger(logrus.WithFields(nil), gs, state, timeout)
 }
 
 // AssertFleetCondition waits for the Fleet to be in a specific condition or fails the test if the condition can't be met in 5 minutes.
@@ -246,11 +379,11 @@ func (f *Framework) WaitForFleetGameServerListCondition(flt *agonesv1.Fleet,
 
 // NewStatsCollector returns new instance of statistics collector,
 // which can be used to emit performance statistics for load tests and stress tests.
-func (f *Framework) NewStatsCollector(name string) *StatsCollector {
+func (f *Framework) NewStatsCollector(name, version string) *StatsCollector {
 	if f.StressTestLevel > 0 {
 		name = fmt.Sprintf("stress_%v_%v", f.StressTestLevel, name)
 	}
-	return &StatsCollector{name: name, outputDir: f.PerfOutputDir}
+	return &StatsCollector{name: name, outputDir: f.PerfOutputDir, version: version}
 }
 
 // CleanUp Delete all Agones resources in a given namespace.
@@ -309,7 +442,22 @@ func SendGameServerUDP(gs *agonesv1.GameServer, msg string) (string, error) {
 	if len(gs.Status.Ports) == 0 {
 		return "", errors.New("Empty Ports array")
 	}
-	address := fmt.Sprintf("%s:%d", gs.Status.Address, gs.Status.Ports[0].Port)
+	return SendGameServerUDPToPort(gs, gs.Status.Ports[0].Name, msg)
+}
+
+// SendGameServerUDPToPort sends a message to a gameserver at the named port and returns its reply
+// returns error if no Ports were allocated or a port of the specified name doesn't exist
+func SendGameServerUDPToPort(gs *agonesv1.GameServer, portName string, msg string) (string, error) {
+	if len(gs.Status.Ports) == 0 {
+		return "", errors.New("Empty Ports array")
+	}
+	var port agonesv1.GameServerStatusPort
+	for _, p := range gs.Status.Ports {
+		if p.Name == portName {
+			port = p
+		}
+	}
+	address := fmt.Sprintf("%s:%d", gs.Status.Address, port.Port)
 	return SendUDP(address, msg)
 }
 
@@ -350,21 +498,20 @@ func GetAllocation(f *agonesv1.Fleet) *allocationv1.GameServerAllocation {
 		}}
 }
 
-// CreateNamespace creates a namespace in the test cluster
-func (f *Framework) CreateNamespace(t *testing.T, namespace string) {
-	t.Helper()
-
+// CreateNamespace creates a namespace and a service account in the test cluster
+func (f *Framework) CreateNamespace(namespace string) error {
 	kubeCore := f.KubeClient.CoreV1()
 	ns := &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   namespace,
-			Labels: map[string]string{"owner": "e2e-test"},
+			Labels: NamespaceLabel,
 		},
 	}
+
 	if _, err := kubeCore.Namespaces().Create(ns); err != nil {
-		t.Fatalf("creating namespace %s failed: %s", namespace, err)
+		return errors.Errorf("creating namespace %s failed: %s", namespace, err.Error())
 	}
-	t.Logf("Namespace %s is created", namespace)
+	logrus.Infof("Namespace %s is created", namespace)
 
 	saName := "agones-sdk"
 	if _, err := kubeCore.ServiceAccounts(namespace).Create(&corev1.ServiceAccount{
@@ -374,9 +521,14 @@ func (f *Framework) CreateNamespace(t *testing.T, namespace string) {
 			Labels:    map[string]string{"app": "agones"},
 		},
 	}); err != nil {
-		t.Fatalf("creating ServiceAccount %s in namespace %s failed: %s", saName, namespace, err)
+		err = errors.Errorf("creating ServiceAccount %s in namespace %s failed: %s", saName, namespace, err.Error())
+		derr := f.DeleteNamespace(namespace)
+		if derr != nil {
+			return errors.Wrap(err, derr.Error())
+		}
+		return err
 	}
-	t.Logf("ServiceAccount %s/%s is created", namespace, saName)
+	logrus.Infof("ServiceAccount %s/%s is created", namespace, saName)
 
 	rb := &rbacv1.RoleBinding{
 		ObjectMeta: metav1.ObjectMeta{
@@ -398,21 +550,26 @@ func (f *Framework) CreateNamespace(t *testing.T, namespace string) {
 		},
 	}
 	if _, err := f.KubeClient.RbacV1().RoleBindings(namespace).Create(rb); err != nil {
-		t.Fatalf("creating RoleBinding for service account %q in namespace %q failed: %s", saName, namespace, err)
+		err = errors.Errorf("creating RoleBinding for service account %q in namespace %q failed: %s", saName, namespace, err.Error())
+		derr := f.DeleteNamespace(namespace)
+		if derr != nil {
+			return errors.Wrap(err, derr.Error())
+		}
+		return err
 	}
-	t.Logf("RoleBinding %s/%s is created", namespace, rb.Name)
+	logrus.Infof("RoleBinding %s/%s is created", namespace, rb.Name)
+
+	return nil
 }
 
 // DeleteNamespace deletes a namespace from the test cluster
-func (f *Framework) DeleteNamespace(t *testing.T, namespace string) {
-	t.Helper()
-
+func (f *Framework) DeleteNamespace(namespace string) error {
 	kubeCore := f.KubeClient.CoreV1()
 
 	// Remove finalizers
 	pods, err := kubeCore.Pods(namespace).List(metav1.ListOptions{})
 	if err != nil {
-		t.Fatalf("listing pods in namespace %s failed: %s", namespace, err)
+		return errors.Errorf("listing pods in namespace %s failed: %s", namespace, err)
 	}
 	for i := range pods.Items {
 		pod := &pods.Items[i]
@@ -424,18 +581,61 @@ func (f *Framework) DeleteNamespace(t *testing.T, namespace string) {
 			}}
 			payloadBytes, _ := json.Marshal(payload)
 			if _, err := kubeCore.Pods(namespace).Patch(pod.Name, types.JSONPatchType, payloadBytes); err != nil {
-				t.Errorf("updating pod %s failed: %s", pod.GetName(), err)
+				return errors.Wrapf(err, "updating pod %s failed", pod.GetName())
 			}
 		}
 	}
 
 	if err := kubeCore.Namespaces().Delete(namespace, &metav1.DeleteOptions{}); err != nil {
-		t.Fatalf("deleting namespace %s failed: %s", namespace, err)
+		return errors.Wrapf(err, "deleting namespace %s failed", namespace)
 	}
-	t.Logf("Namespace %s is deleted", namespace)
+	logrus.Infof("Namespace %s is deleted", namespace)
+	return nil
 }
 
 type patchRemoveNoValue struct {
 	Op   string `json:"op"`
 	Path string `json:"path"`
+}
+
+// DefaultGameServer provides a default GameServer fixture, based on parameters
+// passed to the Test Framework.
+func (f *Framework) DefaultGameServer(namespace string) *agonesv1.GameServer {
+	gs := &agonesv1.GameServer{ObjectMeta: metav1.ObjectMeta{GenerateName: "udp-server", Namespace: namespace},
+		Spec: agonesv1.GameServerSpec{
+			Container: "udp-server",
+			Ports: []agonesv1.GameServerPort{{
+				ContainerPort: 7654,
+				Name:          "gameport",
+				PortPolicy:    agonesv1.Dynamic,
+				Protocol:      corev1.ProtocolUDP,
+			}},
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name:            "udp-server",
+						Image:           f.GameServerImage,
+						ImagePullPolicy: corev1.PullIfNotPresent,
+						Resources: corev1.ResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceCPU:    resource.MustParse("30m"),
+								corev1.ResourceMemory: resource.MustParse("32Mi"),
+							},
+							Limits: corev1.ResourceList{
+								corev1.ResourceCPU:    resource.MustParse("30m"),
+								corev1.ResourceMemory: resource.MustParse("32Mi"),
+							},
+						},
+					}},
+				},
+			},
+		},
+	}
+
+	if f.PullSecret != "" {
+		gs.Spec.Template.Spec.ImagePullSecrets = []corev1.LocalObjectReference{{
+			Name: f.PullSecret}}
+	}
+
+	return gs
 }

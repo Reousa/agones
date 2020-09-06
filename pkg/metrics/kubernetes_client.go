@@ -53,6 +53,8 @@ var (
 )
 
 func init() {
+	distributionSeconds := []float64{0, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1, 2, 3}
+	distributionNumbers := []float64{0, 10, 50, 100, 150, 250, 300}
 
 	runtime.Must(view.Register(&view.View{
 		Name:        "k8s_client_http_request_total",
@@ -66,7 +68,7 @@ func init() {
 		Name:        "k8s_client_http_request_duration_seconds",
 		Measure:     httpRequestLatencyStats,
 		Description: "The distribution of HTTP requests latencies to the Kubernetes API by status code",
-		Aggregation: view.Distribution(0, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1, 2, 3),
+		Aggregation: view.Distribution(distributionSeconds...),
 		TagKeys:     []tag.Key{keyVerb, keyEndpoint},
 	}))
 
@@ -81,14 +83,14 @@ func init() {
 		Name:        "k8s_client_cache_list_duration_seconds",
 		Measure:     cacheListLatencyStats,
 		Description: "Duration of a Kubernetes list API call in seconds",
-		Aggregation: view.Distribution(0, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1, 2, 3),
+		Aggregation: view.Distribution(distributionSeconds...),
 	}))
 
 	runtime.Must(view.Register(&view.View{
 		Name:        "k8s_client_cache_list_items",
 		Measure:     cacheListItemCountStats,
 		Description: "Count of items in a list from the Kubernetes API.",
-		Aggregation: view.Distribution(0),
+		Aggregation: view.Distribution(distributionNumbers...),
 	}))
 
 	runtime.Must(view.Register(&view.View{
@@ -109,14 +111,14 @@ func init() {
 		Name:        "k8s_client_cache_watch_duration_seconds",
 		Measure:     cacheWatchesLatencyStats,
 		Description: "Duration of watches on the Kubernetes API.",
-		Aggregation: view.Distribution(0),
+		Aggregation: view.Distribution(distributionSeconds...),
 	}))
 
 	runtime.Must(view.Register(&view.View{
 		Name:        "k8s_client_cache_watch_events",
 		Measure:     cacheItemsInWatchesCountStats,
 		Description: "Number of items in watches on the Kubernetes API.",
-		Aggregation: view.Distribution(0),
+		Aggregation: view.Distribution(distributionNumbers...),
 	}))
 
 	runtime.Must(view.Register(&view.View{
@@ -146,7 +148,7 @@ func init() {
 		Name:        "k8s_client_workqueue_latency_seconds",
 		Measure:     workQueueLatencyStats,
 		Description: "How long an item stays in the work queue.",
-		Aggregation: view.Distribution(0),
+		Aggregation: view.Distribution(distributionSeconds...),
 		TagKeys:     []tag.Key{keyQueueName},
 	}))
 
@@ -154,7 +156,7 @@ func init() {
 		Name:        "k8s_client_workqueue_work_duration_seconds",
 		Measure:     workQueueWorkDurationStats,
 		Description: "How long processing an item from the work queue takes.",
-		Aggregation: view.Distribution(0),
+		Aggregation: view.Distribution(distributionSeconds...),
 		TagKeys:     []tag.Key{keyQueueName},
 	}))
 
@@ -292,7 +294,7 @@ func (clientGoMetricAdapter) NewAddsMetric(name string) workqueue.CounterMetric 
 	return newOcMetric(workQueueItemsTotalStats).withTag(keyQueueName, name)
 }
 
-func (clientGoMetricAdapter) NewLatencyMetric(name string) workqueue.SummaryMetric {
+func (clientGoMetricAdapter) NewLatencyMetric(name string) workqueue.HistogramMetric {
 	m := newOcMetric(workQueueLatencyStats).withTag(keyQueueName, name)
 	// Convert microseconds to seconds for consistency across metrics.
 	return observeFunc(func(f float64) {
@@ -300,7 +302,7 @@ func (clientGoMetricAdapter) NewLatencyMetric(name string) workqueue.SummaryMetr
 	})
 }
 
-func (clientGoMetricAdapter) NewWorkDurationMetric(name string) workqueue.SummaryMetric {
+func (clientGoMetricAdapter) NewWorkDurationMetric(name string) workqueue.HistogramMetric {
 	m := newOcMetric(workQueueWorkDurationStats).withTag(keyQueueName, name)
 	// Convert microseconds to seconds for consistency across metrics.
 	return observeFunc(func(f float64) {
@@ -312,10 +314,46 @@ func (clientGoMetricAdapter) NewRetriesMetric(name string) workqueue.CounterMetr
 	return newOcMetric(workQueueRetriesTotalStats).withTag(keyQueueName, name)
 }
 
-func (clientGoMetricAdapter) NewLongestRunningProcessorMicrosecondsMetric(string) workqueue.SettableGaugeMetric {
+func (clientGoMetricAdapter) NewLongestRunningProcessorSecondsMetric(string) workqueue.SettableGaugeMetric {
 	return newOcMetric(workQueueLongestRunningProcessorStats)
 }
 
 func (clientGoMetricAdapter) NewUnfinishedWorkSecondsMetric(string) workqueue.SettableGaugeMetric {
 	return newOcMetric(workQueueUnfinishedWorkStats)
+}
+
+func (clientGoMetricAdapter) NewDeprecatedDepthMetric(name string) workqueue.GaugeMetric {
+	return newOcMetric(workQueueDepthStats).withTag(keyQueueName, name)
+}
+
+func (clientGoMetricAdapter) NewDeprecatedAddsMetric(name string) workqueue.CounterMetric {
+	return newOcMetric(workQueueItemsTotalStats).withTag(keyQueueName, name)
+}
+
+func (clientGoMetricAdapter) NewDeprecatedLatencyMetric(name string) workqueue.SummaryMetric {
+	m := newOcMetric(workQueueLatencyStats).withTag(keyQueueName, name)
+	// Convert microseconds to seconds for consistency across metrics.
+	return observeFunc(func(f float64) {
+		m.Observe(f / 1e6)
+	})
+}
+
+func (clientGoMetricAdapter) NewDeprecatedLongestRunningProcessorMicrosecondsMetric(string) workqueue.SettableGaugeMetric {
+	return newOcMetric(workQueueLongestRunningProcessorStats)
+}
+
+func (clientGoMetricAdapter) NewDeprecatedRetriesMetric(name string) workqueue.CounterMetric {
+	return newOcMetric(workQueueRetriesTotalStats).withTag(keyQueueName, name)
+}
+
+func (clientGoMetricAdapter) NewDeprecatedUnfinishedWorkSecondsMetric(string) workqueue.SettableGaugeMetric {
+	return newOcMetric(workQueueUnfinishedWorkStats)
+}
+
+func (clientGoMetricAdapter) NewDeprecatedWorkDurationMetric(name string) workqueue.SummaryMetric {
+	m := newOcMetric(workQueueWorkDurationStats).withTag(keyQueueName, name)
+	// Convert microseconds to seconds for consistency across metrics.
+	return observeFunc(func(f float64) {
+		m.Observe(f / 1e6)
+	})
 }

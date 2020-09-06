@@ -108,7 +108,7 @@ func (wq *WorkerQueue) EnqueueImmediately(obj interface{}) {
 	wq.queue.Add(key)
 }
 
-// EnqueueAfter delays an enqueuee operation by duration
+// EnqueueAfter delays an enqueue operation by duration
 func (wq *WorkerQueue) EnqueueAfter(obj interface{}, duration time.Duration) {
 	var key string
 	var err error
@@ -152,7 +152,7 @@ func (wq *WorkerQueue) processNextWorkItem() bool {
 
 	if err := wq.SyncHandler(key); err != nil {
 		// Conflicts are expected, so only show them in debug operations.
-		if k8serror.IsConflict(err) {
+		if k8serror.IsConflict(errors.Cause(err)) {
 			wq.logger.WithField(wq.keyName, obj).Debug(err)
 		} else {
 			runtime.HandleError(wq.logger.WithField(wq.keyName, obj), err)

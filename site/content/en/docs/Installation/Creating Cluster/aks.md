@@ -13,7 +13,7 @@ You can use either [Azure Cloud Shell](https://docs.microsoft.com/azure/cloud-sh
 
 ## Creating the AKS cluster
 
-If you are using Azure CLI from your local shell, you need to login to your Azure account by executing the `az login` command and following the login procedure.
+If you are using Azure CLI from your local shell, you need to log in to your Azure account by executing the `az login` command and following the login procedure.
 
 Here are the steps you need to follow to create a new AKS cluster (additional instructions and clarifications are listed [here](https://docs.microsoft.com/azure/aks/kubernetes-walkthrough)):
 
@@ -27,8 +27,8 @@ AKS_LOCATION=westeurope          # Azure region in which you'll deploy your AKS 
 az group create --name $AKS_RESOURCE_GROUP --location $AKS_LOCATION
 
 # Create the AKS cluster - this might take some time. Type 'az aks create -h' to see all available options
-# The following command will create a four Node AKS cluster. Node size is Standard A1 v1 and Kubernetes version is 1.13.12. Plus, SSH keys will be generated for you, use --ssh-key-value to provide your values
-az aks create --resource-group $AKS_RESOURCE_GROUP --name $AKS_NAME --node-count 4 --generate-ssh-keys --node-vm-size Standard_A4_v2 --kubernetes-version 1.13.12
+# The following command will create a four Node AKS cluster. Node size is Standard A1 v1 and Kubernetes version is 1.15.10. Plus, SSH keys will be generated for you, use --ssh-key-value to provide your values
+az aks create --resource-group $AKS_RESOURCE_GROUP --name $AKS_NAME --node-count 4 --generate-ssh-keys --node-vm-size Standard_A4_v2 --kubernetes-version 1.15.10
 
 # Install kubectl
 sudo az aks install-cli
@@ -43,7 +43,7 @@ Alternatively, you can use the [Azure Portal](https://portal.azure.com) to creat
 
 For Agones to work correctly, we need to allow UDP traffic to pass through to our AKS cluster. To achieve this, we must update the NSG (Network Security Group) with the proper rule. A simple way to do that is:
 
-* Login to the Azure Portal
+* Log in to the Azure Portal
 * Find the resource group where the AKS resources are kept, which should have a name like `MC_resourceGroupName_AKSName_westeurope`. Alternative, you can type `az resource show --namespace Microsoft.ContainerService --resource-type managedClusters -g $AKS_RESOURCE_GROUP -n $AKS_NAME -o json | jq .properties.nodeResourceGroup`
 * Find the Network Security Group object, which should have a name like `aks-agentpool-********-nsg`
 * Select **Inbound Security Rules**

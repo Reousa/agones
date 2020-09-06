@@ -15,17 +15,21 @@
 package sdkserver
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"io/ioutil"
 	"os"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
 
 	agonesv1 "agones.dev/agones/pkg/apis/agones/v1"
 	"agones.dev/agones/pkg/sdk"
+	"agones.dev/agones/pkg/sdk/alpha"
+	"agones.dev/agones/pkg/util/runtime"
 	"github.com/stretchr/testify/assert"
-	"golang.org/x/net/context"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 )
@@ -60,23 +64,34 @@ func TestLocal(t *testing.T) {
 	gs, err := l.GetGameServer(ctx, e)
 	assert.Nil(t, err)
 
-	assert.Equal(t, defaultGs, gs)
+	defaultGameServer := defaultGs()
+	// do this to adjust for any time differences.
+	// we only care about all the other values to be compared.
+	defaultGameServer.ObjectMeta.CreationTimestamp = gs.GetObjectMeta().CreationTimestamp
+
+	assert.Equal(t, defaultGameServer.GetObjectMeta(), gs.GetObjectMeta())
+	assert.Equal(t, defaultGameServer.GetSpec(), gs.GetSpec())
+	gsStatus := defaultGameServer.GetStatus()
+	gsStatus.State = "Shutdown"
+	assert.Equal(t, gsStatus, gs.GetStatus())
 }
 
 func TestLocalSDKWithTestMode(t *testing.T) {
+	l, err := NewLocalSDKServer("")
+	assert.NoError(t, err, "Should be able to create local SDK server")
 	a := []string{"ready", "allocate", "setlabel", "setannotation", "gameserver", "health", "shutdown", "watch"}
 	b := []string{"ready", "health", "ready", "watch", "allocate", "gameserver", "setlabel", "setannotation", "health", "health", "shutdown"}
-	assert.True(t, EqualSets(a, a))
-	assert.True(t, EqualSets(a, b))
-	assert.True(t, EqualSets(b, a))
-	assert.True(t, EqualSets(b, b))
+	assert.True(t, l.EqualSets(a, a))
+	assert.True(t, l.EqualSets(a, b))
+	assert.True(t, l.EqualSets(b, a))
+	assert.True(t, l.EqualSets(b, b))
 	a[0] = "rady"
-	assert.False(t, EqualSets(a, b))
-	assert.False(t, EqualSets(b, a))
+	assert.False(t, l.EqualSets(a, b))
+	assert.False(t, l.EqualSets(b, a))
 	a[0] = "ready"
 	b[1] = "halth"
-	assert.False(t, EqualSets(a, b))
-	assert.False(t, EqualSets(b, a))
+	assert.False(t, l.EqualSets(a, b))
+	assert.False(t, l.EqualSets(b, a))
 }
 
 func TestLocalSDKWithGameServer(t *testing.T) {
@@ -115,6 +130,9 @@ func TestLocalSDKServerSetLabel(t *testing.T) {
 	}
 
 	for k, v := range fixtures {
+		// pin variables here, see scopelint for details
+		k := k
+		v := v
 		t.Run(k, func(t *testing.T) {
 			ctx := context.Background()
 			e := &sdk.Empty{}
@@ -153,12 +171,9 @@ func TestLocalSDKServerSetLabel(t *testing.T) {
 			assert.Nil(t, err)
 			assert.Equal(t, gs.ObjectMeta.Labels[metadataPrefix+"foo"], "bar")
 
-			select {
-			case msg := <-stream.msgs:
-				assert.Equal(t, msg.ObjectMeta.Labels[metadataPrefix+"foo"], "bar")
-			case <-time.After(10 * time.Second):
-				assert.Fail(t, "timeout on receiving messages")
-			}
+			assertWatchUpdate(t, stream, "bar", func(gs *sdk.GameServer) interface{} {
+				return gs.ObjectMeta.Labels[metadataPrefix+"foo"]
+			})
 
 			l.Close()
 			wg.Wait()
@@ -224,12 +239,9 @@ func TestLocalSDKServerSetAnnotation(t *testing.T) {
 			assert.Nil(t, err)
 			assert.Equal(t, gs.ObjectMeta.Annotations[metadataPrefix+"bar"], "foo")
 
-			select {
-			case msg := <-stream.msgs:
-				assert.Equal(t, msg.ObjectMeta.Annotations[metadataPrefix+"bar"], "foo")
-			case <-time.After(10 * time.Second):
-				assert.FailNow(t, "timeout on receiving messages")
-			}
+			assertWatchUpdate(t, stream, "foo", func(gs *sdk.GameServer) interface{} {
+				return gs.ObjectMeta.Annotations[metadataPrefix+"bar"]
+			})
 
 			l.Close()
 			wg.Wait()
@@ -253,13 +265,18 @@ func TestLocalSDKServerWatchGameServer(t *testing.T) {
 		err := l.WatchGameServer(e, stream)
 		assert.Nil(t, err)
 	}()
+	// wait for watching to begin
+	err = wait.Poll(time.Second, 10*time.Second, func() (bool, error) {
+		found := false
+		l.updateObservers.Range(func(_, _ interface{}) bool {
+			found = true
+			return false
+		})
+		return found, nil
+	})
+	assert.NoError(t, err)
 
-	select {
-	case <-stream.msgs:
-		assert.Fail(t, "should not get a message")
-	case <-time.After(time.Second):
-	}
-
+	assertNoWatchUpdate(t, stream)
 	fixture.ObjectMeta.Annotations = map[string]string{"foo": "bar"}
 	j, err := json.Marshal(fixture)
 	assert.Nil(t, err)
@@ -267,22 +284,261 @@ func TestLocalSDKServerWatchGameServer(t *testing.T) {
 	err = ioutil.WriteFile(path, j, os.ModeDevice)
 	assert.Nil(t, err)
 
+	assertWatchUpdate(t, stream, "bar", func(gs *sdk.GameServer) interface{} {
+		return gs.ObjectMeta.Annotations["foo"]
+	})
+}
+
+func TestLocalSDKServerPlayerCapacity(t *testing.T) {
+	t.Parallel()
+
+	runtime.FeatureTestMutex.Lock()
+	defer runtime.FeatureTestMutex.Unlock()
+	assert.NoError(t, runtime.ParseFeatures(string(runtime.FeaturePlayerTracking)+"=true"))
+
+	fixture := &agonesv1.GameServer{ObjectMeta: metav1.ObjectMeta{Name: "stuff"}}
+
+	e := &alpha.Empty{}
+	path, err := gsToTmpFile(fixture)
+	assert.NoError(t, err)
+	l, err := NewLocalSDKServer(path)
+	assert.Nil(t, err)
+
+	stream := newGameServerMockStream()
+	go func() {
+		err := l.WatchGameServer(&sdk.Empty{}, stream)
+		assert.Nil(t, err)
+	}()
+
+	// wait for watching to begin
+	err = wait.Poll(time.Second, 10*time.Second, func() (bool, error) {
+		found := false
+		l.updateObservers.Range(func(_, _ interface{}) bool {
+			found = true
+			return false
+		})
+		return found, nil
+	})
+	assert.NoError(t, err)
+
+	c, err := l.GetPlayerCapacity(context.Background(), e)
+	assert.NoError(t, err)
+	assert.Equal(t, int64(0), c.Count)
+
+	_, err = l.SetPlayerCapacity(context.Background(), &alpha.Count{Count: 10})
+	assert.NoError(t, err)
+
 	select {
 	case msg := <-stream.msgs:
-		assert.Equal(t, "bar", msg.ObjectMeta.Annotations["foo"])
+		assert.Equal(t, int64(10), msg.Status.Players.Capacity)
 	case <-time.After(10 * time.Second):
 		assert.Fail(t, "timeout getting watch")
 	}
+
+	c, err = l.GetPlayerCapacity(context.Background(), e)
+	assert.NoError(t, err)
+	assert.Equal(t, int64(10), c.Count)
+
+	gs, err := l.GetGameServer(context.Background(), &sdk.Empty{})
+	assert.NoError(t, err)
+	assert.Equal(t, int64(10), gs.Status.Players.Capacity)
 }
 
-func gsToTmpFile(gs *agonesv1.GameServer) (string, error) {
-	file, err := ioutil.TempFile(os.TempDir(), "gameserver-")
-	if err != nil {
-		return file.Name(), err
+func TestLocalSDKServerPlayerConnectAndDisconnect(t *testing.T) {
+	t.Parallel()
+
+	runtime.FeatureTestMutex.Lock()
+	defer runtime.FeatureTestMutex.Unlock()
+	assert.NoError(t, runtime.ParseFeatures(string(runtime.FeaturePlayerTracking)+"=true"))
+
+	gs := func() *agonesv1.GameServer {
+		return &agonesv1.GameServer{
+			ObjectMeta: metav1.ObjectMeta{Name: "stuff"},
+			Status: agonesv1.GameServerStatus{
+				Players: &agonesv1.PlayerStatus{
+					Capacity: 1,
+				},
+			}}
 	}
 
-	err = json.NewEncoder(file).Encode(gs)
-	return file.Name(), err
+	e := &alpha.Empty{}
+
+	// nolint: maligned
+	fixtures := map[string]struct {
+		testMode bool
+		gs       *agonesv1.GameServer
+		useFile  bool
+	}{
+		"test mode on, gs with Status.Players": {
+			testMode: true,
+			gs:       gs(),
+			useFile:  true,
+		},
+		"test mode off, gs with Status.Players": {
+			testMode: false,
+			gs:       gs(),
+			useFile:  true,
+		},
+		"test mode on, gs without Status.Players": {
+			testMode: true,
+			useFile:  true,
+		},
+		"test mode off, gs without Status.Players": {
+			testMode: false,
+			useFile:  true,
+		},
+		"test mode on, no filePath": {
+			testMode: true,
+			useFile:  false,
+		},
+		"test mode off, no filePath": {
+			testMode: false,
+			useFile:  false,
+		},
+	}
+
+	for k, v := range fixtures {
+		// pin variables here, see https://github.com/kyoh86/scopelint for the details
+		k := k
+		v := v
+		t.Run(k, func(t *testing.T) {
+			var l *LocalSDKServer
+			var err error
+			if v.useFile {
+				path, pathErr := gsToTmpFile(v.gs)
+				assert.NoError(t, pathErr)
+				l, err = NewLocalSDKServer(path)
+			} else {
+				l, err = NewLocalSDKServer("")
+			}
+			assert.Nil(t, err)
+			l.SetTestMode(v.testMode)
+
+			stream := newGameServerMockStream()
+			go func() {
+				err := l.WatchGameServer(&sdk.Empty{}, stream)
+				assert.Nil(t, err)
+			}()
+
+			// wait for watching to begin
+			err = wait.Poll(time.Second, 10*time.Second, func() (bool, error) {
+				found := false
+				l.updateObservers.Range(func(_, _ interface{}) bool {
+					found = true
+					return false
+				})
+				return found, nil
+			})
+			assert.NoError(t, err)
+
+			if !v.useFile || v.gs == nil {
+				_, err := l.SetPlayerCapacity(context.Background(), &alpha.Count{
+					Count: 1,
+				})
+				assert.NoError(t, err)
+				expected := &sdk.GameServer_Status_PlayerStatus{
+					Capacity: 1,
+				}
+				assertWatchUpdate(t, stream, expected, func(gs *sdk.GameServer) interface{} {
+					return gs.Status.Players
+				})
+			}
+
+			id := &alpha.PlayerID{PlayerID: "one"}
+			ok, err := l.IsPlayerConnected(context.Background(), id)
+			assert.NoError(t, err)
+			if assert.NotNil(t, ok) {
+				assert.False(t, ok.Bool, "player should not be connected")
+			}
+
+			count, err := l.GetPlayerCount(context.Background(), e)
+			assert.NoError(t, err)
+			assert.Equal(t, int64(0), count.Count)
+
+			list, err := l.GetConnectedPlayers(context.Background(), e)
+			assert.NoError(t, err)
+			assert.Empty(t, list.List)
+
+			// connect a player
+			ok, err = l.PlayerConnect(context.Background(), id)
+			assert.NoError(t, err)
+			assert.True(t, ok.Bool, "Player should not exist yet")
+
+			count, err = l.GetPlayerCount(context.Background(), e)
+			assert.NoError(t, err)
+			assert.Equal(t, int64(1), count.Count)
+
+			expected := &sdk.GameServer_Status_PlayerStatus{
+				Count:    1,
+				Capacity: 1,
+				Ids:      []string{id.PlayerID},
+			}
+			assertWatchUpdate(t, stream, expected, func(gs *sdk.GameServer) interface{} {
+				return gs.Status.Players
+			})
+
+			ok, err = l.IsPlayerConnected(context.Background(), id)
+			assert.NoError(t, err)
+			assert.True(t, ok.Bool, "player should be connected")
+
+			list, err = l.GetConnectedPlayers(context.Background(), e)
+			assert.NoError(t, err)
+			assert.Equal(t, []string{id.PlayerID}, list.List)
+
+			// add same player
+			ok, err = l.PlayerConnect(context.Background(), id)
+			assert.NoError(t, err)
+			assert.False(t, ok.Bool, "Player already exists")
+
+			count, err = l.GetPlayerCount(context.Background(), e)
+			assert.NoError(t, err)
+			assert.Equal(t, int64(1), count.Count)
+			assertNoWatchUpdate(t, stream)
+
+			list, err = l.GetConnectedPlayers(context.Background(), e)
+			assert.NoError(t, err)
+			assert.Equal(t, []string{id.PlayerID}, list.List)
+
+			// should return an error if we try to add another, since we're at capacity
+			nopePlayer := &alpha.PlayerID{PlayerID: "nope"}
+			_, err = l.PlayerConnect(context.Background(), nopePlayer)
+			assert.EqualError(t, err, "Players are already at capacity")
+
+			ok, err = l.IsPlayerConnected(context.Background(), nopePlayer)
+			assert.NoError(t, err)
+			assert.False(t, ok.Bool)
+
+			// disconnect a player
+			ok, err = l.PlayerDisconnect(context.Background(), id)
+			assert.NoError(t, err)
+			assert.True(t, ok.Bool, "Player should be removed")
+			count, err = l.GetPlayerCount(context.Background(), e)
+			assert.NoError(t, err)
+			assert.Equal(t, int64(0), count.Count)
+
+			expected = &sdk.GameServer_Status_PlayerStatus{
+				Count:    0,
+				Capacity: 1,
+				Ids:      []string{},
+			}
+			assertWatchUpdate(t, stream, expected, func(gs *sdk.GameServer) interface{} {
+				return gs.Status.Players
+			})
+
+			list, err = l.GetConnectedPlayers(context.Background(), e)
+			assert.NoError(t, err)
+			assert.Empty(t, list.List)
+
+			// remove same player
+			ok, err = l.PlayerDisconnect(context.Background(), id)
+			assert.NoError(t, err)
+			assert.False(t, ok.Bool, "Player already be gone")
+			count, err = l.GetPlayerCount(context.Background(), e)
+			assert.NoError(t, err)
+			assert.Equal(t, int64(0), count.Count)
+			assertNoWatchUpdate(t, stream)
+		})
+	}
 }
 
 // TestLocalSDKServerStateUpdates verify that SDK functions changes the state of the
@@ -322,4 +578,89 @@ func TestLocalSDKServerStateUpdates(t *testing.T) {
 	gs, err = l.GetGameServer(ctx, e)
 	assert.Nil(t, err)
 	assert.Equal(t, gs.Status.State, string(agonesv1.GameServerStateShutdown))
+}
+
+// TestSDKConformanceFunctionality - run a number of record requests in parallel
+func TestSDKConformanceFunctionality(t *testing.T) {
+	t.Parallel()
+
+	l, err := NewLocalSDKServer("")
+	assert.Nil(t, err)
+	l.testMode = true
+	l.recordRequest("")
+	l.gs = &sdk.GameServer{ObjectMeta: &sdk.GameServer_ObjectMeta{Name: "empty"}}
+	exampleUID := "052fb0f4-3d50-11e5-b066-42010af0d7b6"
+	// field which is tested
+	setAnnotation := "setannotation"
+	l.gs.ObjectMeta.Uid = exampleUID
+
+	var expected []string
+	expected = append(expected, "", setAnnotation)
+
+	wg := sync.WaitGroup{}
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		str := fmt.Sprintf("%d", i)
+		expected = append(expected, str)
+
+		go func() {
+			l.recordRequest(str)
+			l.recordRequestWithValue(setAnnotation, exampleUID, "UID")
+			wg.Done()
+		}()
+	}
+	wg.Wait()
+
+	l.SetExpectedSequence(expected)
+	b := l.EqualSets(l.expectedSequence, l.requestSequence)
+	assert.True(t, b, "we should receive strings from all go routines %v %v", l.expectedSequence, l.requestSequence)
+}
+
+func TestAlphaSDKConformanceFunctionality(t *testing.T) {
+	t.Parallel()
+	lStable, err := NewLocalSDKServer("")
+	assert.Nil(t, err)
+	v := int64(0)
+	lStable.recordRequestWithValue("setplayercapacity", strconv.FormatInt(v, 10), "PlayerCapacity")
+	lStable.recordRequestWithValue("isplayerconnected", "", "PlayerIDs")
+
+	runtime.FeatureTestMutex.Lock()
+	defer runtime.FeatureTestMutex.Unlock()
+
+	assert.NoError(t, runtime.ParseFeatures(string(runtime.FeaturePlayerTracking)+"=true"))
+	l, err := NewLocalSDKServer("")
+	assert.Nil(t, err)
+	l.testMode = true
+	l.recordRequestWithValue("setplayercapacity", strconv.FormatInt(v, 10), "PlayerCapacity")
+	l.recordRequestWithValue("isplayerconnected", "", "PlayerIDs")
+
+}
+
+func gsToTmpFile(gs *agonesv1.GameServer) (string, error) {
+	file, err := ioutil.TempFile(os.TempDir(), "gameserver-")
+	if err != nil {
+		return file.Name(), err
+	}
+
+	err = json.NewEncoder(file).Encode(gs)
+	return file.Name(), err
+}
+
+// assertWatchUpdate checks the values of an update message when a GameServer value has been changed
+func assertWatchUpdate(t *testing.T, stream *gameServerMockStream, expected interface{}, actual func(gs *sdk.GameServer) interface{}) {
+	select {
+	case msg := <-stream.msgs:
+		assert.Equal(t, expected, actual(msg))
+	case <-time.After(20 * time.Second):
+		assert.Fail(t, "timeout on receiving messages")
+	}
+}
+
+// assertNoWatchUpdate checks that no update message has been sent for changes to the GameServer
+func assertNoWatchUpdate(t *testing.T, stream *gameServerMockStream) {
+	select {
+	case <-stream.msgs:
+		assert.Fail(t, "should not get a message")
+	case <-time.After(time.Second):
+	}
 }

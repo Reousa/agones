@@ -28,11 +28,18 @@ import (
 // Block of const Error messages
 const (
 	ErrContainerRequired        = "Container is required when using multiple containers in the pod template"
-	ErrHostPortDynamic          = "HostPort cannot be specified with a Dynamic PortPolicy"
+	ErrHostPort                 = "HostPort cannot be specified with a Dynamic or Passthrough PortPolicy"
 	ErrPortPolicyStatic         = "PortPolicy must be Static"
 	ErrContainerPortRequired    = "ContainerPort must be defined for Dynamic and Static PortPolicies"
 	ErrContainerPortPassthrough = "ContainerPort cannot be specified with Passthrough PortPolicy"
+	ErrContainerNameInvalid     = "Container must be empty or the name of a container in the pod template"
 )
+
+// AggregatedPlayerStatus stores total player tracking values
+type AggregatedPlayerStatus struct {
+	Count    int64 `json:"count"`
+	Capacity int64 `json:"capacity"`
+}
 
 // crd is an interface to get Name and Kind of CRD
 type crd interface {
@@ -49,7 +56,7 @@ func validateName(c crd) []metav1.StatusCause {
 	if len(name) > validation.LabelValueMaxLength {
 		causes = append(causes, metav1.StatusCause{
 			Type:    metav1.CauseTypeFieldValueInvalid,
-			Field:   fmt.Sprintf("Name"),
+			Field:   "Name",
 			Message: fmt.Sprintf("Length of %s '%s' name should be no more than 63 characters.", kind, name),
 		})
 	}

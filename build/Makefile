@@ -24,7 +24,7 @@
 #
 
 # base version target. This is usually the next release.
-base_version = 1.4.0
+base_version = 1.9.0
 
 # agones image release registry
 release_registry = gcr.io/agones-images
@@ -57,7 +57,9 @@ KIND_PROFILE ?= agones
 KIND_CONTAINER_NAME=$(KIND_PROFILE)-control-plane
 
 # Game Server image to use while doing end-to-end tests
-GS_TEST_IMAGE ?= gcr.io/agones-images/udp-server:0.17
+GS_TEST_IMAGE ?= gcr.io/agones-images/udp-server:0.21
+
+ALPHA_FEATURE_GATES ?= "PlayerTracking=true&SDKWatchSendOnExecute=true"
 
 # Directory that this Makefile is in.
 mkfile_path := $(abspath $(lastword $(MAKEFILE_LIST)))
@@ -68,13 +70,15 @@ site_path := $(agones_path)/site
 kubeconfig_path := $(dir $(KUBECONFIG))
 kubeconfig_file := $(notdir $(KUBECONFIG))
 
-helm_path := ~/.helm
+helm_config := ~/.config/helm
+helm_cache := ~/.cache/helm
 
 agones_package = agones.dev/agones
 mount_path = /go/src/$(agones_package)
 common_mounts = -v $(build_path)/.config/gcloud:/root/.config/gcloud \
 				-v $(kubeconfig_path):/root/.kube \
-				-v $(helm_path):/root/.helm \
+				-v $(helm_config):/root/.config/helm \
+				-v $(helm_cache):/root/.cache/helm \
 				-v $(agones_path):$(mount_path) \
 				-v $(build_path)/.gomod:/go/pkg/mod
 
@@ -208,7 +212,7 @@ build-chart: CHART_DIR ?= install/helm/agones/
 build-chart: $(ensure-build-image)
 	docker run --rm $(common_mounts) -w $(workdir_path) $(build_tag) bash -c \
 		"mkdir -p install/helm/bin/ && rm -rf install/helm/bin/* && \
-			helm init --client-only && helm package -d install/helm/bin/ --version $(RELEASE_VERSION) $(CHART_DIR)"
+			helm package -d install/helm/bin/ --version $(RELEASE_VERSION) $(CHART_DIR)"
 
 # push the current chart to google cloud storage and update the index
 push-chart: $(ensure-build-image) build-chart
@@ -232,18 +236,35 @@ push-release-chart: $(ensure-build-image)
 test: $(ensure-build-image) test-go test-sdks test-install-yaml site-test
 
 # Run go tests
-test-go:
+test-go: $(ensure-build-image)
 	$(GO_TEST) $(agones_package)/pkg/... \
 	    $(agones_package)/sdks/... $(agones_package)/cmd/...
 
 # Runs end-to-end tests on the current configured cluster
 # For minikube user the minikube-test-e2e targets
-test-e2e: $(ensure-build-image)
-	echo "Starting e2e test runner!"
-	$(GO_TEST) $(agones_package)/test/e2e $(ARGS) $(GO_E2E_TEST_ARGS) \
+test-e2e:
+	$(MAKE) test-e2e-integration
+	$(MAKE) test-e2e-failure
+
+
+# If GAMESERVERS_NAMESPACE is empty - random namespace will be created
+test-e2e-integration: FEATURE_GATES ?= $(ALPHA_FEATURE_GATES)
+test-e2e-integration: GAMESERVERS_NAMESPACE ?= ""
+test-e2e-integration: $(ensure-build-image)
+	echo "Starting e2e integration test!"
+	$(GO_TEST) $(ARGS) $(agones_package)/test/e2e $(GO_E2E_TEST_ARGS) \
 		--gameserver-image=$(GS_TEST_IMAGE) \
-		--pullsecret=$(IMAGE_PULL_SECRET)
-	echo "Finishing e2e test runner!"
+		--pullsecret=$(IMAGE_PULL_SECRET) \
+		--feature-gates=$(FEATURE_GATES) \
+		--namespace=$(GAMESERVERS_NAMESPACE)
+	echo "Finishing e2e integration test!"
+
+test-e2e-failure: $(ensure-build-image)
+	echo "starting e2e controller failure test"
+	$(GO_TEST) -parallel=1 $(agones_package)/test/e2e/controller $(GO_E2E_TEST_ARGS) \
+    	--gameserver-image=$(GS_TEST_IMAGE) \
+    	--pullsecret=$(IMAGE_PULL_SECRET)
+	echo "Finishing e2e controller failure test!"
 
 # Runs end-to-end stress tests on the current configured cluster
 # For minikube user the minikube-stress-test-e2e targets
@@ -254,7 +275,8 @@ stress-test-e2e: $(ensure-build-image)
 		--gameserver-image=$(GS_TEST_IMAGE) \
 		--pullsecret=$(IMAGE_PULL_SECRET) \
 		--stress $(STRESS_TEST_LEVEL) \
-		--perf-output $(PERF_OUTPUT_DIR)
+		--perf-output $(PERF_OUTPUT_DIR) \
+		--version $(VERSION)
 
 # Run test on install yaml - make sure there is no change
 # mostly this is for CI
@@ -276,9 +298,11 @@ install: PING_SERVICE_TYPE := "LoadBalancer"
 install: ALLOCATOR_SERVICE_TYPE := "LoadBalancer"
 install: CRD_CLEANUP := true
 install: LOG_LEVEL := "debug"
+install: FEATURE_GATES ?= $(ALPHA_FEATURE_GATES)
 install: $(ensure-build-image) install-custom-pull-secret
 	$(DOCKER_RUN) \
-		helm upgrade --install --wait --namespace=agones-system\
+		helm upgrade --install --wait --namespace=agones-system \
+		--create-namespace \
 		--set agones.image.tag=$(VERSION),agones.image.registry=$(REGISTRY) \
 		--set agones.image.controller.pullPolicy=$(IMAGE_PULL_POLICY),agones.image.sdk.alwaysPull=$(ALWAYS_PULL_SIDECAR) \
 		--set agones.image.controller.pullSecret=$(IMAGE_PULL_SECRET) \
@@ -286,11 +310,12 @@ install: $(ensure-build-image) install-custom-pull-secret
 		--set agones.allocator.http.serviceType=$(ALLOCATOR_SERVICE_TYPE) \
 		--set agones.controller.logLevel=$(LOG_LEVEL) \
 		--set agones.crds.cleanupOnDelete=$(CRD_CLEANUP) \
+		--set agones.featureGates=$(FEATURE_GATES) \
 		agones $(mount_path)/install/helm/agones/
 
 uninstall: $(ensure-build-image)
 	$(DOCKER_RUN) \
-		helm delete --purge agones
+		helm uninstall agones --namespace=agones-system
 
 
 # Build a static binary for the gameserver controller
@@ -322,22 +347,22 @@ build-controller-image: $(ensure-build-image) build-controller-binary build-lice
 push-controller-image: $(ensure-build-image)
 	docker push $(controller_tag)
 
-# build the static binary for the gamesever sidecar
+# build the static binary for the gameserver sidecar
 build-agones-sdk-binary: $(ensure-build-image) build-agones-sdk-binary-linux build-agones-sdk-binary-windows build-agones-sdk-binary-darwin
 	$(ZIP_SDK) \
 		agonessdk-server-$(VERSION).zip sdk-server.darwin.amd64 sdk-server.linux.amd64 sdk-server.windows.amd64.exe
 
-# build the static binary for the gamesever sidecar for Linux
+# build the static binary for the gameserver sidecar for Linux
 build-agones-sdk-binary-linux: $(ensure-build-image)
 	$(GO_BUILD_LINUX_AMD64) \
 		-o $(go_build_base_path)/cmd/sdk-server/bin/sdk-server.linux.amd64 $(go_rebuild_flags) $(go_version_flags) -installsuffix cgo $(agones_package)/cmd/sdk-server
 
-# build the static binary for the gamesever sidecar for Darwin (macOS)
+# build the static binary for the gameserver sidecar for Darwin (macOS)
 build-agones-sdk-binary-darwin: $(ensure-build-image)
 	$(GO_BUILD_DARWIN_AMD64) \
 		-o $(go_build_base_path)/cmd/sdk-server/bin/sdk-server.darwin.amd64 $(go_rebuild_flags) $(go_version_flags) $(agones_package)/cmd/sdk-server
 
-# build the windows binary for the gamesever sidecar for Windows
+# build the windows binary for the gameserver sidecar for Windows
 build-agones-sdk-binary-windows: $(ensure-build-image)
 	$(GO_BUILD_WINDOWS_AMD64) \
 		-o $(go_build_base_path)/cmd/sdk-server/bin/sdk-server.windows.amd64.exe $(go_rebuild_flags) $(go_version_flags) $(agones_package)/cmd/sdk-server
@@ -385,9 +410,10 @@ push-agones-sdk-image: $(ensure-build-image)
 # Generate the static install script
 gen-install: $(ensure-build-image)
 	docker run --rm $(common_mounts) $(DOCKER_RUN_ARGS) $(build_tag) bash -c \
-		'helm template --name=agones-manual --namespace agones-system $(mount_path)/install/helm/agones \
+		'helm template agones-manual --namespace agones-system $(mount_path)/install/helm/agones \
 		--set agones.controller.generateTLS=false \
 		--set agones.allocator.generateTLS=false \
+		--set agones.allocator.generateClientTLS=false \
 		--set agones.crds.cleanupOnDelete=false \
 		> $(mount_path)/install/yaml/install.yaml'
 
@@ -421,11 +447,16 @@ setup-prometheus: PVC ?= true
 setup-prometheus: PV_SIZE ?= 64Gi
 setup-prometheus: SCRAPE_INTERVAL=30s
 setup-prometheus:
-	$(DOCKER_RUN) \
-		helm upgrade --install --wait prom stable/prometheus --namespace metrics \
+	$(DOCKER_RUN) helm repo add stable https://kubernetes-charts.storage.googleapis.com/
+	$(DOCKER_RUN) helm repo update
+	$(DOCKER_RUN) helm upgrade prom stable/prometheus \
+		--install --wait --namespace metrics --create-namespace \
 		--set server.global.scrape_interval=$(SCRAPE_INTERVAL),server.persistentVolume.enabled=$(PVC),server.persistentVolume.size=$(PV_SIZE) \
-		$(HELM_ARGS) \
-		-f $(mount_path)/build/prometheus.yaml
+		$(HELM_ARGS) -f $(mount_path)/build/prometheus.yaml
+
+uninstall-prometheus: $(ensure-build-image)
+	$(DOCKER_RUN) \
+		helm uninstall prom --namespace=metrics
 
 # setup grafana in the current cluster with datasource and dashboards ready for use with agones
 # by default Persistent Volume Claims are requested.
@@ -433,19 +464,23 @@ setup-grafana: PVC ?= true
 setup-grafana: PV_SIZE ?= 64Gi
 setup-grafana: PASSWORD ?= admin
 setup-grafana:
+	-$(DOCKER_RUN) kubectl create namespace metrics
+	$(DOCKER_RUN) helm repo add stable https://kubernetes-charts.storage.googleapis.com/
+	$(DOCKER_RUN) helm repo update
 	$(DOCKER_RUN) kubectl apply -f $(mount_path)/build/grafana/
-	$(DOCKER_RUN) \
-		helm upgrade --install --wait grafana stable/grafana --version=3.12.0  --namespace metrics \
+	$(DOCKER_RUN) helm upgrade grafana stable/grafana \
+		--install --wait --namespace metrics \
 		--set persistence.enabled=$(PVC),server.persistentVolume.size=$(PV_SIZE) \
 		--set adminPassword=$(PASSWORD) -f $(mount_path)/build/grafana.yaml
 
-setup-test-cluster: DOCKER_RUN_ARGS+=--network=host
-setup-test-cluster: $(ensure-build-image)
-	$(DOCKER_RUN) kubectl apply -f $(mount_path)/build/helm.yaml
-	$(DOCKER_RUN) helm init --wait --service-account helm
+uninstall-grafana: $(ensure-build-image)
+	$(DOCKER_RUN) helm uninstall grafana --namespace=metrics
+	$(DOCKER_RUN) kubectl delete -f $(mount_path)/build/grafana/
+
+helm-repo-update:
+	$(DOCKER_RUN) helm repo update
 
 clean-test-cluster: $(ensure-build-image) $(uninstall)
-	docker run --rm -it $(common_mounts) -e "KUBECONFIG=/root/.kube/$(kubeconfig_file)" $(DOCKER_RUN_ARGS) $(build_tag) helm reset
 
 install-custom-pull-secret:
 	# if IMAGE_PULL_SECRET_FILE is specified, create the agones-system namespace and install the secret

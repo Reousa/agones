@@ -13,7 +13,7 @@ A full GameServer specification is available below and in the {{< ghlink href="e
 apiVersion: "agones.dev/v1"
 kind: GameServer
 # GameServer Metadata
-# https://v1-13.docs.kubernetes.io/docs/reference/generated/kubernetes-api/v1.13/#objectmeta-v1-meta
+# https://v1-16.docs.kubernetes.io/docs/reference/generated/kubernetes-api/v1.16/#objectmeta-v1-meta
 metadata:
   # generateName: "gds-example" # generate a unique name, with the given prefix
   name: "gds-example" # set a fixed name
@@ -31,6 +31,10 @@ spec:
     # - "Passthrough" dynamically sets the `containerPort` to the same value as the dynamically selected hostPort.
     #      This will mean that users will need to lookup what port has been opened through the server side SDK.
     portPolicy: Static
+    # [Stage:Beta]
+    # [FeatureFlag:ContainerPortAllocation]
+    # The name of the container to open the port on. Defaults to the game server container if omitted or empty.
+    container: simple-udp
     # the port that is being opened on the game server process
     containerPort: 7654
     # the port exposed on the host, only required when `portPolicy` is "Static". Overwritten when portPolicy is "Dynamic".
@@ -63,8 +67,15 @@ spec:
     # conflict with other TCP connections.
     grpcPort: 9357
     httpPort: 9358
+  # [Stage:Alpha]
+  # [FeatureFlag:PlayerTracking]
+  # Players provides the configuration for player tracking features.
+  # Commented out since Alpha, and disabled by default
+  # players:
+  #   # set this GameServer's initial player capacity
+  #   initialCapacity: 10
   # Pod template configuration
-  # https://v1-13.docs.kubernetes.io/docs/reference/generated/kubernetes-api/v1.13/#podtemplate-v1-core
+  # https://v1-16.docs.kubernetes.io/docs/reference/generated/kubernetes-api/v1.16/#podtemplate-v1-core
   template:
     # pod metadata. Name & Namespace is overwritten
     metadata:
@@ -74,7 +85,7 @@ spec:
     spec:
       containers:
       - name: simple-udp
-        image:  gcr.io/agones-images/udp-server:0.17
+        image:  gcr.io/agones-images/udp-server:0.21
         imagePullPolicy: Always
 ```
 
@@ -93,18 +104,20 @@ The `spec` field is the actual GameServer specification and it is composed as fo
   - `portPolicy` has three options:
         - `Dynamic` (default) the system allocates a random free hostPort for the gameserver, for game clients to connect to.
         - `Static`, user defines the hostPort that the game client will connect to. Then onus is on the user to ensure that the port is available. When static is the policy specified, `hostPort` is required to be populated.
-        - `Passthrough` dynamically sets the `containerPort` to the same value a randomly selected hostPort. This will mean that users will need to lookup what port to open through the server side SDK before starting communications.
+        - `Passthrough` dynamically sets the `containerPort`  to the same value as the dynamically selected hostPort. This will mean that users will need to lookup what port to open through the server side SDK before starting communications.
+  - `container` (Alpha) the name of the container to open the port on. Defaults to the game server container if omitted or empty.
   - `containerPort` the port that is being opened on the game server process, this is a required field for `Dynamic` and `Static` port policies, and should not be included in <code>Passthrough</code> configuration.
   - `protocol` the protocol being used. Defaults to UDP. TCP is the only other option.
 - `health` to track the overall healthy state of the GameServer, more information available in the [health check documentation]({{< relref "../Guides/health-checking.md" >}}).
--`sdkServer` defines parameters for the game server sidecar
+- `sdkServer` defines parameters for the game server sidecar
   - `logging` field defines log level for SDK server. Defaults to "Info". It has three options:
     - "Info" (default) The SDK server will output all messages except for debug messages
     - "Debug" The SDK server will output all messages including debug messages
     - "Error" The SDK server will only output error messages
   - `grpcPort` the port that the SDK Server binds to for gRPC connections
   - `httpPort` the port that the SDK Server binds to for HTTP gRPC gateway connections
-- `template` the [pod spec template](https://v1-13.docs.kubernetes.io/docs/reference/generated/kubernetes-api/v1.13/#podtemplatespec-v1-core) to run your GameServer containers, [see](https://kubernetes.io/docs/concepts/workloads/pods/pod-overview/#pod-templates) for more information.
+- `players` (Alpha, behind "PlayerTracking" feature gate), sets this GameServer's initial player capacity
+- `template` the [pod spec template](https://v1-16.docs.kubernetes.io/docs/reference/generated/kubernetes-api/v1.16/#podtemplatespec-v1-core) to run your GameServer containers, [see](https://kubernetes.io/docs/concepts/workloads/pods/pod-overview/#pod-templates) for more information.
 
 ## GameServer State Diagram
 

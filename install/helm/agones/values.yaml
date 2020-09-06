@@ -88,11 +88,13 @@ agones:
       response: ok
       port: 80
       serviceType: LoadBalancer
+      annotations: {}
     udp:
       expose: true
       rateLimit: 20
       port: 50000
       serviceType: LoadBalancer
+      annotations: {}
     healthCheck:
       initialDelaySeconds: 3
       periodSeconds: 3
@@ -122,10 +124,15 @@ agones:
     http:
       port: 443
       serviceType: LoadBalancer
+      loadBalancerIP: ""
+      annotations: {}
     generateTLS: true
+    generateClientTLS: true
+    disableMTLS: false
+    disableTLS: false
   image:
     registry: gcr.io/agones-images
-    tag: 1.4.0
+    tag: 1.9.0-dev
     controller:
       name: agones-controller
       pullPolicy: IfNotPresent
@@ -133,6 +140,8 @@ agones:
       name: agones-sdk
       cpuRequest: 30m
       cpuLimit: 0
+      memoryRequest: 0
+      memoryLimit: 0
       alwaysPull: false
     ping:
       name: agones-ping
@@ -141,10 +150,11 @@ agones:
       name: agones-allocator
       pullPolicy: IfNotPresent
 
-
 gameservers:
   namespaces:
   - default
   minPort: 7000
   maxPort: 8000
 
+helm:
+  installTests: false

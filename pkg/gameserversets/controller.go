@@ -160,7 +160,7 @@ func (c *Controller) Run(workers int, stop <-chan struct{}) error {
 		return err
 	}
 
-	c.baseLogger.Info("Wait for cache sync")
+	c.baseLogger.Debug("Wait for cache sync")
 	if !cache.WaitForCacheSync(stop, c.gameServerSynced, c.gameServerSetSynced) {
 		return errors.New("failed to wait for caches to sync")
 	}
@@ -172,7 +172,7 @@ func (c *Controller) Run(workers int, stop <-chan struct{}) error {
 // updateValidationHandler that validates a GameServerSet when is updated
 // Should only be called on gameserverset update operations.
 func (c *Controller) updateValidationHandler(review admv1beta1.AdmissionReview) (admv1beta1.AdmissionReview, error) {
-	c.baseLogger.WithField("review", review).Info("updateValidationHandler")
+	c.baseLogger.WithField("review", review).Debug("updateValidationHandler")
 
 	newGss := &agonesv1.GameServerSet{}
 	oldGss := &agonesv1.GameServerSet{}
@@ -213,7 +213,7 @@ func (c *Controller) updateValidationHandler(review admv1beta1.AdmissionReview) 
 // creationValidationHandler that validates a GameServerSet when is created
 // Should only be called on gameserverset create operations.
 func (c *Controller) creationValidationHandler(review admv1beta1.AdmissionReview) (admv1beta1.AdmissionReview, error) {
-	c.baseLogger.WithField("review", review).Info("creationValidationHandler")
+	c.baseLogger.WithField("review", review).Debug("creationValidationHandler")
 
 	newGss := &agonesv1.GameServerSet{}
 
@@ -233,12 +233,12 @@ func (c *Controller) creationValidationHandler(review admv1beta1.AdmissionReview
 		}
 		review.Response.Result = &metav1.Status{
 			Status:  metav1.StatusFailure,
-			Message: "GameServerSet update is invalid",
+			Message: "GameServerSet create is invalid",
 			Reason:  metav1.StatusReasonInvalid,
 			Details: &details,
 		}
 
-		c.loggerForGameServerSet(newGss).WithField("review", review).Info("Invalid GameServerSet update")
+		c.loggerForGameServerSet(newGss).WithField("review", review).Debug("Invalid GameServerSet update")
 		return review, nil
 	}
 
@@ -258,7 +258,7 @@ func (c *Controller) gameServerEventHandler(obj interface{}) {
 	gsSet, err := c.gameServerSetLister.GameServerSets(gs.ObjectMeta.Namespace).Get(ref.Name)
 	if err != nil {
 		if k8serrors.IsNotFound(err) {
-			c.baseLogger.WithField("ref", ref).Info("Owner GameServerSet no longer available for syncing")
+			c.baseLogger.WithField("ref", ref).Debug("Owner GameServerSet no longer available for syncing")
 		} else {
 			runtime.HandleError(c.baseLogger.WithField("gsKey", gs.ObjectMeta.Namespace+"/"+gs.ObjectMeta.Name).WithField("ref", ref),
 				errors.Wrap(err, "error retrieving GameServer owner"))
@@ -294,7 +294,7 @@ func (c *Controller) syncGameServerSet(key string) error {
 	gsSet, err := c.gameServerSetLister.GameServerSets(namespace).Get(name)
 	if err != nil {
 		if k8serrors.IsNotFound(err) {
-			c.loggerForGameServerSetKey(key).Info("GameServerSet is no longer available for syncing")
+			c.loggerForGameServerSetKey(key).Debug("GameServerSet is no longer available for syncing")
 			return nil
 		}
 		return errors.Wrapf(err, "error retrieving GameServerSet %s from namespace %s", name, namespace)
@@ -331,7 +331,7 @@ func (c *Controller) syncGameServerSet(key string) error {
 		WithField("isPartial", isPartial).
 		WithField("status", status).
 		WithFields(fields).
-		Info("Reconciling GameServerSet")
+		Debug("Reconciling GameServerSet")
 	if isPartial {
 		// we've determined that there's work to do, but we've decided not to do all the work in one shot
 		// make sure we get a follow-up, by re-scheduling this GSS in the worker queue immediately before this
@@ -500,7 +500,7 @@ func (c *Controller) deleteGameServers(gsSet *agonesv1.GameServerSet, toDelete [
 		gsCopy.Status.State = agonesv1.GameServerStateShutdown
 		_, err := c.gameServerGetter.GameServers(gs.Namespace).Update(gsCopy)
 		if err != nil {
-			return errors.Wrapf(err, "error updating gameserver %s from status %s to Shutdown status.", gs.ObjectMeta.Name, gs.Status.State)
+			return errors.Wrapf(err, "error updating gameserver %s from status %s to Shutdown status", gs.ObjectMeta.Name, gs.Status.State)
 		}
 
 		c.stateCache.forGameServerSet(gsSet).deleted(gs)
@@ -603,6 +603,24 @@ func computeStatus(list []*agonesv1.GameServer) agonesv1.GameServerSetStatus {
 			status.AllocatedReplicas++
 		case agonesv1.GameServerStateReserved:
 			status.ReservedReplicas++
+		}
+	}
+
+	if runtime.FeatureEnabled(runtime.FeaturePlayerTracking) {
+		// to make this code simpler, while the feature gate is in place,
+		// we will loop around the gs list twice.
+		status.Players = &agonesv1.AggregatedPlayerStatus{}
+		// TODO: integrate this extra loop into the above for loop when PlayerTracking moves to GA
+		for _, gs := range list {
+			if gs.ObjectMeta.DeletionTimestamp.IsZero() &&
+				(gs.Status.State == agonesv1.GameServerStateReady ||
+					gs.Status.State == agonesv1.GameServerStateReserved ||
+					gs.Status.State == agonesv1.GameServerStateAllocated) {
+				if gs.Status.Players != nil {
+					status.Players.Capacity += gs.Status.Players.Capacity
+					status.Players.Count += gs.Status.Players.Count
+				}
+			}
 		}
 	}
 

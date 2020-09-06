@@ -30,8 +30,6 @@ import (
 	sdkalpha "agones.dev/agones/pkg/sdk/alpha"
 	sdkbeta "agones.dev/agones/pkg/sdk/beta"
 	"agones.dev/agones/pkg/sdkserver"
-	serveralpha "agones.dev/agones/pkg/sdkserver/alpha"
-	serverbeta "agones.dev/agones/pkg/sdkserver/beta"
 	"agones.dev/agones/pkg/util/runtime"
 	"agones.dev/agones/pkg/util/signals"
 	gwruntime "github.com/grpc-ecosystem/grpc-gateway/runtime"
@@ -53,14 +51,15 @@ const (
 	podNamespaceEnv   = "POD_NAMESPACE"
 
 	// Flags (that can also be env vars)
-	localFlag    = "local"
-	fileFlag     = "file"
-	testFlag     = "test"
-	addressFlag  = "address"
-	delayFlag    = "delay"
-	timeoutFlag  = "timeout"
-	grpcPortFlag = "grpc-port"
-	httpPortFlag = "http-port"
+	localFlag       = "local"
+	fileFlag        = "file"
+	testFlag        = "test"
+	testSdkNameFlag = "sdk-name"
+	addressFlag     = "address"
+	delayFlag       = "delay"
+	timeoutFlag     = "timeout"
+	grpcPortFlag    = "grpc-port"
+	httpPortFlag    = "http-port"
 )
 
 var (
@@ -154,8 +153,8 @@ func main() {
 			}
 		}()
 		sdk.RegisterSDKServer(grpcServer, s)
-		sdkalpha.RegisterSDKServer(grpcServer, serveralpha.NewSDKServer())
-		sdkbeta.RegisterSDKServer(grpcServer, serverbeta.NewSDKServer())
+		sdkalpha.RegisterSDKServer(grpcServer, s)
+		sdkbeta.RegisterSDKServer(grpcServer, s)
 	}
 
 	grpcEndpoint := fmt.Sprintf("%s:%d", ctlConf.Address, ctlConf.GRPCPort)
@@ -175,7 +174,8 @@ func main() {
 func registerLocal(grpcServer *grpc.Server, ctlConf config) (func(), error) {
 	filePath := ""
 	if ctlConf.LocalFile != "" {
-		filePath, err := filepath.Abs(ctlConf.LocalFile)
+		var err error
+		filePath, err = filepath.Abs(ctlConf.LocalFile)
 		if err != nil {
 			return nil, err
 		}
@@ -185,45 +185,38 @@ func registerLocal(grpcServer *grpc.Server, ctlConf config) (func(), error) {
 		}
 	}
 
-	stableSDK, err := sdkserver.NewLocalSDKServer(filePath)
+	s, err := sdkserver.NewLocalSDKServer(filePath)
 	if err != nil {
 		return nil, err
 	}
-	alphaSDK := serveralpha.NewLocalSDKServer()
-	betaSDK := serverbeta.NewLocalSDKServer()
 
-	sdk.RegisterSDKServer(grpcServer, stableSDK)
-	sdkalpha.RegisterSDKServer(grpcServer, alphaSDK)
-	sdkbeta.RegisterSDKServer(grpcServer, betaSDK)
+	sdk.RegisterSDKServer(grpcServer, s)
+	sdkalpha.RegisterSDKServer(grpcServer, s)
+	sdkbeta.RegisterSDKServer(grpcServer, s)
 	return func() {
-		alphaSDK.Close()
-		betaSDK.Close()
-		stableSDK.Close()
+		s.Close()
 	}, err
 }
 
 // registerLocal registers the local test SDK servers, and returns a cancel func that
 // closes all the SDK implementations
 func registerTestSdkServer(grpcServer *grpc.Server, ctlConf config) (func(), error) {
-	stableSDK, err := sdkserver.NewLocalSDKServer("")
+	s, err := sdkserver.NewLocalSDKServer("")
 	if err != nil {
 		return nil, err
 	}
-	alphaSDK := serveralpha.NewLocalSDKServer()
-	betaSDK := serverbeta.NewLocalSDKServer()
 
-	stableSDK.SetTestMode(true)
-	stableSDK.GenerateUID()
+	s.SetTestMode(true)
+	s.GenerateUID()
 	expectedFuncs := strings.Split(ctlConf.Test, ",")
-	stableSDK.SetExpectedSequence(expectedFuncs)
+	s.SetExpectedSequence(expectedFuncs)
+	s.SetSdkName(ctlConf.TestSdkName)
 
-	sdk.RegisterSDKServer(grpcServer, stableSDK)
-	sdkalpha.RegisterSDKServer(grpcServer, alphaSDK)
-	sdkbeta.RegisterSDKServer(grpcServer, betaSDK)
+	sdk.RegisterSDKServer(grpcServer, s)
+	sdkalpha.RegisterSDKServer(grpcServer, s)
+	sdkbeta.RegisterSDKServer(grpcServer, s)
 	return func() {
-		alphaSDK.Close()
-		betaSDK.Close()
-		stableSDK.Close()
+		s.Close()
 	}, err
 }
 
@@ -247,8 +240,11 @@ func runGateway(ctx context.Context, grpcEndpoint string, mux *gwruntime.ServeMu
 		logger.WithError(err).Fatal("Could not dial grpc server...")
 	}
 
-	if err = sdk.RegisterSDKHandler(ctx, mux, conn); err != nil {
-		logger.WithError(err).Fatal("Could not register grpc-gateway")
+	if err := sdk.RegisterSDKHandler(ctx, mux, conn); err != nil {
+		logger.WithError(err).Fatal("Could not register sdk grpc-gateway")
+	}
+	if err := sdkalpha.RegisterSDKHandler(ctx, mux, conn); err != nil {
+		logger.WithError(err).Fatal("Could not register alpha sdk grpc-gateway")
 	}
 
 	logger.WithField("httpEndpoint", httpServer.Addr).Info("Starting SDKServer grpc-gateway...")
@@ -268,6 +264,7 @@ func parseEnvFlags() config {
 	viper.SetDefault(localFlag, false)
 	viper.SetDefault(fileFlag, "")
 	viper.SetDefault(testFlag, "")
+	viper.SetDefault(testSdkNameFlag, "")
 	viper.SetDefault(addressFlag, "localhost")
 	viper.SetDefault(delayFlag, 0)
 	viper.SetDefault(timeoutFlag, 0)
@@ -281,7 +278,8 @@ func parseEnvFlags() config {
 	pflag.Int(httpPortFlag, viper.GetInt(httpPortFlag), fmt.Sprintf("Port on which to bind the HTTP server. Defaults to %d", defaultHTTPPort))
 	pflag.Int(delayFlag, viper.GetInt(delayFlag), "Time to delay (in seconds) before starting to execute main. Useful for tests")
 	pflag.Int(timeoutFlag, viper.GetInt(timeoutFlag), "Time of execution (in seconds) before close. Useful for tests")
-	pflag.String(testFlag, viper.GetString(testFlag), "List functions which shoud be called during the SDK Conformance test run.")
+	pflag.String(testFlag, viper.GetString(testFlag), "List functions which should be called during the SDK Conformance test run.")
+	pflag.String(testSdkNameFlag, viper.GetString(testSdkNameFlag), "SDK name which is tested by this SDK Conformance test.")
 	runtime.FeaturesBindFlags()
 	pflag.Parse()
 
@@ -289,6 +287,7 @@ func parseEnvFlags() config {
 	runtime.Must(viper.BindEnv(localFlag))
 	runtime.Must(viper.BindEnv(addressFlag))
 	runtime.Must(viper.BindEnv(testFlag))
+	runtime.Must(viper.BindEnv(testSdkNameFlag))
 	runtime.Must(viper.BindEnv(gameServerNameEnv))
 	runtime.Must(viper.BindEnv(podNamespaceEnv))
 	runtime.Must(viper.BindEnv(delayFlag))
@@ -301,25 +300,27 @@ func parseEnvFlags() config {
 	runtime.Must(runtime.ParseFeaturesFromEnv())
 
 	return config{
-		IsLocal:   viper.GetBool(localFlag),
-		Address:   viper.GetString(addressFlag),
-		LocalFile: viper.GetString(fileFlag),
-		Delay:     viper.GetInt(delayFlag),
-		Timeout:   viper.GetInt(timeoutFlag),
-		Test:      viper.GetString(testFlag),
-		GRPCPort:  viper.GetInt(grpcPortFlag),
-		HTTPPort:  viper.GetInt(httpPortFlag),
+		IsLocal:     viper.GetBool(localFlag),
+		Address:     viper.GetString(addressFlag),
+		LocalFile:   viper.GetString(fileFlag),
+		Delay:       viper.GetInt(delayFlag),
+		Timeout:     viper.GetInt(timeoutFlag),
+		Test:        viper.GetString(testFlag),
+		TestSdkName: viper.GetString(testSdkNameFlag),
+		GRPCPort:    viper.GetInt(grpcPortFlag),
+		HTTPPort:    viper.GetInt(httpPortFlag),
 	}
 }
 
 // config is all the configuration for this program
 type config struct {
-	Address   string
-	IsLocal   bool
-	LocalFile string
-	Delay     int
-	Timeout   int
-	Test      string
-	GRPCPort  int
-	HTTPPort  int
+	Address     string
+	IsLocal     bool
+	LocalFile   string
+	Delay       int
+	Timeout     int
+	Test        string
+	TestSdkName string
+	GRPCPort    int
+	HTTPPort    int
 }

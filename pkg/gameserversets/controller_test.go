@@ -16,6 +16,7 @@ package gameserversets
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"testing"
@@ -25,11 +26,14 @@ import (
 	agonesv1 "agones.dev/agones/pkg/apis/agones/v1"
 	"agones.dev/agones/pkg/gameservers"
 	agtesting "agones.dev/agones/pkg/testing"
+	utilruntime "agones.dev/agones/pkg/util/runtime"
 	"agones.dev/agones/pkg/util/webhooks"
 	"github.com/heptiolabs/healthcheck"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	admv1beta1 "k8s.io/api/admission/v1beta1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
@@ -57,6 +61,8 @@ const (
 )
 
 func TestComputeReconciliationAction(t *testing.T) {
+	t.Parallel()
+
 	cases := []struct {
 		desc                   string
 		list                   []*agonesv1.GameServer
@@ -265,6 +271,8 @@ func TestComputeReconciliationAction(t *testing.T) {
 }
 
 func TestComputeStatus(t *testing.T) {
+	t.Parallel()
+
 	cases := []struct {
 		list       []*agonesv1.GameServer
 		wantStatus agonesv1.GameServerSetStatus
@@ -293,9 +301,42 @@ func TestComputeStatus(t *testing.T) {
 	for _, tc := range cases {
 		assert.Equal(t, tc.wantStatus, computeStatus(tc.list))
 	}
+
+	t.Run("player tracking", func(t *testing.T) {
+		utilruntime.FeatureTestMutex.Lock()
+		defer utilruntime.FeatureTestMutex.Unlock()
+
+		require.NoError(t, utilruntime.ParseFeatures(string(utilruntime.FeaturePlayerTracking)+"=true"))
+
+		var list []*agonesv1.GameServer
+		gs1 := gsWithState(agonesv1.GameServerStateAllocated)
+		gs1.Status.Players = &agonesv1.PlayerStatus{Count: 5, Capacity: 10}
+		gs2 := gsWithState(agonesv1.GameServerStateReserved)
+		gs2.Status.Players = &agonesv1.PlayerStatus{Count: 10, Capacity: 15}
+		gs3 := gsWithState(agonesv1.GameServerStateCreating)
+		gs3.Status.Players = &agonesv1.PlayerStatus{Count: 20, Capacity: 30}
+		gs4 := gsWithState(agonesv1.GameServerStateReady)
+		gs4.Status.Players = &agonesv1.PlayerStatus{Count: 15, Capacity: 30}
+		list = append(list, gs1, gs2, gs3, gs4)
+
+		expected := agonesv1.GameServerSetStatus{
+			Replicas:          4,
+			ReadyReplicas:     1,
+			ReservedReplicas:  1,
+			AllocatedReplicas: 1,
+			Players: &agonesv1.AggregatedPlayerStatus{
+				Count:    30,
+				Capacity: 55,
+			},
+		}
+
+		assert.Equal(t, expected, computeStatus(list))
+	})
 }
 
 func TestControllerWatchGameServers(t *testing.T) {
+	t.Parallel()
+
 	gsSet := defaultFixture()
 
 	c, m := newFakeController()
@@ -335,12 +376,12 @@ func TestControllerWatchGameServers(t *testing.T) {
 	}
 
 	expected, err := cache.MetaNamespaceKeyFunc(gsSet)
-	assert.Nil(t, err)
+	require.NoError(t, err)
 
 	// gsSet add
 	logrus.Info("adding gsSet")
 	gsSetWatch.Add(gsSet.DeepCopy())
-	assert.Nil(t, err)
+
 	assert.Equal(t, expected, f())
 	// gsSet update
 	logrus.Info("modify gsSet")
@@ -382,6 +423,8 @@ func TestControllerWatchGameServers(t *testing.T) {
 }
 
 func TestSyncGameServerSet(t *testing.T) {
+	t.Parallel()
+
 	t.Run("adding and deleting unhealthy gameservers", func(t *testing.T) {
 		gsSet := defaultFixture()
 		list := createGameServers(gsSet, 5)
@@ -454,6 +497,8 @@ func TestSyncGameServerSet(t *testing.T) {
 }
 
 func TestControllerSyncUnhealthyGameServers(t *testing.T) {
+	t.Parallel()
+
 	gsSet := defaultFixture()
 
 	gs1 := gsSet.GameServer()
@@ -470,52 +515,97 @@ func TestControllerSyncUnhealthyGameServers(t *testing.T) {
 	gs3.ObjectMeta.DeletionTimestamp = &now
 	gs3.Status = agonesv1.GameServerStatus{State: agonesv1.GameServerStateReady}
 
-	var updatedCount int
+	t.Run("valid case", func(t *testing.T) {
+		var updatedCount int
+		c, m := newFakeController()
+		m.AgonesClient.AddReactor("update", "gameservers", func(action k8stesting.Action) (bool, runtime.Object, error) {
+			ua := action.(k8stesting.UpdateAction)
+			gs := ua.GetObject().(*agonesv1.GameServer)
 
-	c, m := newFakeController()
-	m.AgonesClient.AddReactor("update", "gameservers", func(action k8stesting.Action) (bool, runtime.Object, error) {
-		ua := action.(k8stesting.UpdateAction)
-		gs := ua.GetObject().(*agonesv1.GameServer)
+			assert.Equal(t, gs.Status.State, agonesv1.GameServerStateShutdown)
 
-		assert.Equal(t, gs.Status.State, agonesv1.GameServerStateShutdown)
+			updatedCount++
+			return true, nil, nil
+		})
 
-		updatedCount++
-		return true, nil, nil
+		_, cancel := agtesting.StartInformers(m)
+		defer cancel()
+
+		err := c.deleteGameServers(gsSet, []*agonesv1.GameServer{gs1, gs2, gs3})
+		assert.Nil(t, err)
+
+		assert.Equal(t, 3, updatedCount, "Updates should have occurred")
 	})
 
-	_, cancel := agtesting.StartInformers(m)
-	defer cancel()
+	t.Run("error on update step", func(t *testing.T) {
+		c, m := newFakeController()
+		m.AgonesClient.AddReactor("update", "gameservers", func(action k8stesting.Action) (bool, runtime.Object, error) {
+			ua := action.(k8stesting.UpdateAction)
+			gs := ua.GetObject().(*agonesv1.GameServer)
 
-	err := c.deleteGameServers(gsSet, []*agonesv1.GameServer{gs1, gs2, gs3})
-	assert.Nil(t, err)
+			assert.Equal(t, gs.Status.State, agonesv1.GameServerStateShutdown)
 
-	assert.Equal(t, 3, updatedCount, "Updates should have occurred")
+			return true, nil, errors.New("update-err")
+		})
+
+		_, cancel := agtesting.StartInformers(m)
+		defer cancel()
+
+		err := c.deleteGameServers(gsSet, []*agonesv1.GameServer{gs1, gs2, gs3})
+		require.Error(t, err)
+		assert.Equal(t, "error updating gameserver test-1 from status Unhealthy to Shutdown status: update-err", err.Error())
+	})
 }
 
 func TestSyncMoreGameServers(t *testing.T) {
+	t.Parallel()
 	gsSet := defaultFixture()
 
-	c, m := newFakeController()
-	count := 0
-	expected := 10
+	t.Run("valid case", func(t *testing.T) {
 
-	m.AgonesClient.AddReactor("create", "gameservers", func(action k8stesting.Action) (bool, runtime.Object, error) {
-		ca := action.(k8stesting.CreateAction)
-		gs := ca.GetObject().(*agonesv1.GameServer)
+		c, m := newFakeController()
+		expected := 10
+		count := 0
 
-		assert.True(t, metav1.IsControlledBy(gs, gsSet))
-		count++
+		m.AgonesClient.AddReactor("create", "gameservers", func(action k8stesting.Action) (bool, runtime.Object, error) {
+			ca := action.(k8stesting.CreateAction)
+			gs := ca.GetObject().(*agonesv1.GameServer)
 
-		return true, gs, nil
+			assert.True(t, metav1.IsControlledBy(gs, gsSet))
+			count++
+
+			return true, gs, nil
+		})
+
+		_, cancel := agtesting.StartInformers(m)
+		defer cancel()
+
+		err := c.addMoreGameServers(gsSet, expected)
+		assert.Nil(t, err)
+		assert.Equal(t, expected, count)
+		agtesting.AssertEventContains(t, m.FakeRecorder.Events, "SuccessfulCreate")
 	})
 
-	_, cancel := agtesting.StartInformers(m)
-	defer cancel()
+	t.Run("error on create step", func(t *testing.T) {
+		gsSet := defaultFixture()
+		c, m := newFakeController()
+		expected := 10
+		m.AgonesClient.AddReactor("create", "gameservers", func(action k8stesting.Action) (bool, runtime.Object, error) {
+			ca := action.(k8stesting.CreateAction)
+			gs := ca.GetObject().(*agonesv1.GameServer)
 
-	err := c.addMoreGameServers(gsSet, expected)
-	assert.Nil(t, err)
-	assert.Equal(t, expected, count)
-	agtesting.AssertEventContains(t, m.FakeRecorder.Events, "SuccessfulCreate")
+			assert.True(t, metav1.IsControlledBy(gs, gsSet))
+
+			return true, gs, errors.New("create-err")
+		})
+
+		_, cancel := agtesting.StartInformers(m)
+		defer cancel()
+
+		err := c.addMoreGameServers(gsSet, expected)
+		require.Error(t, err)
+		assert.Equal(t, "error creating gameserver for gameserverset test: create-err", err.Error())
+	})
 }
 
 func TestControllerSyncGameServerSetStatus(t *testing.T) {
@@ -586,13 +676,13 @@ func TestControllerUpdateValidationHandler(t *testing.T) {
 		Spec: agonesv1.GameServerSetSpec{Replicas: 5},
 	}
 	raw, err := json.Marshal(fixture)
-	assert.Nil(t, err)
+	require.NoError(t, err)
 
 	t.Run("valid gameserverset update", func(t *testing.T) {
 		newGSS := fixture.DeepCopy()
 		newGSS.Spec.Replicas = 10
 		newRaw, err := json.Marshal(newGSS)
-		assert.Nil(t, err)
+		require.NoError(t, err)
 
 		review := admv1beta1.AdmissionReview{
 			Request: &admv1beta1.AdmissionRequest{
@@ -609,8 +699,58 @@ func TestControllerUpdateValidationHandler(t *testing.T) {
 		}
 
 		result, err := c.updateValidationHandler(review)
-		assert.Nil(t, err)
-		assert.True(t, result.Response.Allowed)
+		require.NoError(t, err)
+		if !assert.True(t, result.Response.Allowed) {
+			// show the reason of the failure
+			require.NotNil(t, result.Response.Result)
+			require.NotNil(t, result.Response.Result.Details)
+			require.NotEmpty(t, result.Response.Result.Details.Causes)
+		}
+	})
+
+	t.Run("new object is nil, err excpected", func(t *testing.T) {
+		review := admv1beta1.AdmissionReview{
+			Request: &admv1beta1.AdmissionRequest{
+				Kind:      gvk,
+				Operation: admv1beta1.Create,
+				Object: runtime.RawExtension{
+					Raw: nil,
+				},
+				OldObject: runtime.RawExtension{
+					Raw: raw,
+				},
+			},
+			Response: &admv1beta1.AdmissionResponse{Allowed: true},
+		}
+
+		_, err := c.updateValidationHandler(review)
+		require.Error(t, err)
+		assert.Equal(t, "error unmarshalling new GameServerSet json: : unexpected end of JSON input", err.Error())
+	})
+
+	t.Run("old object is nil, err excpected", func(t *testing.T) {
+		newGSS := fixture.DeepCopy()
+		newGSS.Spec.Replicas = 10
+		newRaw, err := json.Marshal(newGSS)
+		require.NoError(t, err)
+
+		review := admv1beta1.AdmissionReview{
+			Request: &admv1beta1.AdmissionRequest{
+				Kind:      gvk,
+				Operation: admv1beta1.Create,
+				Object: runtime.RawExtension{
+					Raw: newRaw,
+				},
+				OldObject: runtime.RawExtension{
+					Raw: nil,
+				},
+			},
+			Response: &admv1beta1.AdmissionResponse{Allowed: true},
+		}
+
+		_, err = c.updateValidationHandler(review)
+		require.Error(t, err)
+		assert.Equal(t, "error unmarshalling old GameServerSet json: : unexpected end of JSON input", err.Error())
 	})
 
 	t.Run("invalid gameserverset update", func(t *testing.T) {
@@ -621,7 +761,7 @@ func TestControllerUpdateValidationHandler(t *testing.T) {
 			},
 		}
 		newRaw, err := json.Marshal(newGSS)
-		assert.Nil(t, err)
+		require.NoError(t, err)
 
 		assert.NotEqual(t, string(raw), string(newRaw))
 
@@ -639,12 +779,118 @@ func TestControllerUpdateValidationHandler(t *testing.T) {
 			Response: &admv1beta1.AdmissionResponse{Allowed: true},
 		}
 
-		logrus.Info("here?")
 		result, err := c.updateValidationHandler(review)
-		assert.Nil(t, err)
+		require.NoError(t, err)
+		require.NotNil(t, result.Response)
+		require.NotNil(t, result.Response.Result)
+		require.NotNil(t, result.Response.Result.Details)
 		assert.False(t, result.Response.Allowed)
+		assert.NotEmpty(t, result.Response.Result.Details.Causes)
 		assert.Equal(t, metav1.StatusFailure, result.Response.Result.Status)
 		assert.Equal(t, metav1.StatusReasonInvalid, result.Response.Result.Reason)
+		assert.Equal(t, "GameServerSet update is invalid", result.Response.Result.Message)
+	})
+}
+
+func TestCreationValidationHandler(t *testing.T) {
+	t.Parallel()
+
+	c, _ := newFakeController()
+	gvk := metav1.GroupVersionKind(agonesv1.SchemeGroupVersion.WithKind("GameServerSet"))
+	fixture := &agonesv1.GameServerSet{ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "default"},
+		Spec: agonesv1.GameServerSetSpec{
+			Replicas: 5,
+			Template: agonesv1.GameServerTemplateSpec{
+				Spec: agonesv1.GameServerSpec{Container: "test",
+					Template: corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "c1"}},
+						},
+					},
+				},
+			},
+		},
+	}
+	raw, err := json.Marshal(fixture)
+	require.NoError(t, err)
+
+	t.Run("valid gameserverset create", func(t *testing.T) {
+		newGSS := fixture.DeepCopy()
+		newGSS.Spec.Replicas = 10
+		newRaw, err := json.Marshal(newGSS)
+		require.NoError(t, err)
+
+		review := admv1beta1.AdmissionReview{
+			Request: &admv1beta1.AdmissionRequest{
+				Kind:      gvk,
+				Operation: admv1beta1.Create,
+				Object: runtime.RawExtension{
+					Raw: newRaw,
+				},
+			},
+			Response: &admv1beta1.AdmissionResponse{Allowed: true},
+		}
+
+		result, err := c.creationValidationHandler(review)
+		require.NoError(t, err)
+		if !assert.True(t, result.Response.Allowed) {
+			// show the reason of the failure
+			require.NotNil(t, result.Response.Result)
+			require.NotNil(t, result.Response.Result.Details)
+			require.NotEmpty(t, result.Response.Result.Details.Causes)
+		}
+	})
+
+	t.Run("object is nil, err excpected", func(t *testing.T) {
+		review := admv1beta1.AdmissionReview{
+			Request: &admv1beta1.AdmissionRequest{
+				Kind:      gvk,
+				Operation: admv1beta1.Create,
+				Object: runtime.RawExtension{
+					Raw: nil,
+				},
+			},
+			Response: &admv1beta1.AdmissionResponse{Allowed: true},
+		}
+
+		_, err := c.creationValidationHandler(review)
+		require.Error(t, err)
+		assert.Equal(t, "error unmarshalling new GameServerSet json: : unexpected end of JSON input", err.Error())
+	})
+
+	t.Run("invalid gameserverset create", func(t *testing.T) {
+		newGSS := fixture.DeepCopy()
+		newGSS.Spec.Template = agonesv1.GameServerTemplateSpec{
+			Spec: agonesv1.GameServerSpec{
+				Ports: []agonesv1.GameServerPort{{PortPolicy: agonesv1.Static}},
+			},
+		}
+		newRaw, err := json.Marshal(newGSS)
+		require.NoError(t, err)
+
+		assert.NotEqual(t, string(raw), string(newRaw))
+
+		review := admv1beta1.AdmissionReview{
+			Request: &admv1beta1.AdmissionRequest{
+				Kind:      gvk,
+				Operation: admv1beta1.Create,
+				Object: runtime.RawExtension{
+					Raw: newRaw,
+				},
+			},
+			Response: &admv1beta1.AdmissionResponse{Allowed: true},
+		}
+
+		result, err := c.creationValidationHandler(review)
+		require.NoError(t, err)
+		require.NotNil(t, result.Response)
+		require.NotNil(t, result.Response.Result)
+		require.NotNil(t, result.Response.Result.Details)
+		assert.False(t, result.Response.Allowed)
+		assert.NotEmpty(t, result.Response.Result.Details.Causes)
+		assert.Equal(t, metav1.StatusFailure, result.Response.Result.Status)
+		assert.Equal(t, metav1.StatusReasonInvalid, result.Response.Result.Reason)
+		assert.Equal(t, "GameServerSet create is invalid", result.Response.Result.Message)
 	})
 }
 

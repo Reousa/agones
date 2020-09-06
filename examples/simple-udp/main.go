@@ -18,6 +18,7 @@ package main
 import (
 	"encoding/json"
 	"flag"
+	"fmt"
 	"log"
 	"net"
 	"os"
@@ -38,6 +39,7 @@ func main() {
 	port := flag.String("port", "7654", "The port to listen to udp traffic on")
 	passthrough := flag.Bool("passthrough", false, "Get listening port from the SDK, rather than use the 'port' value")
 	readyOnStart := flag.Bool("ready", true, "Mark this GameServer as Ready on startup")
+	shutdownDelay := flag.Int("automaticShutdownDelayMin", 0, "If greater than zero, automatically shut down the server this many minutes after the server becomes allocated")
 	flag.Parse()
 	if ep := os.Getenv("PORT"); ep != "" {
 		port = &ep
@@ -84,6 +86,9 @@ func main() {
 		ready(s)
 	}
 
+	if *shutdownDelay > 0 {
+		shutdownAfterAllocation(s, *shutdownDelay)
+	}
 	readWriteLoop(conn, stop, s)
 }
 
@@ -93,6 +98,24 @@ func doSignal() {
 	<-stop
 	log.Println("Exit signal received. Shutting down.")
 	os.Exit(0)
+}
+
+// shutdownAfterAllocation creates a callback to automatically shut down
+// the server a specified number of minutes after the server becomes
+// allocated.
+func shutdownAfterAllocation(s *sdk.SDK, shutdownDelay int) {
+	err := s.WatchGameServer(func(gs *coresdk.GameServer) {
+		if gs.Status.State == "Allocated" {
+			time.Sleep(time.Duration(shutdownDelay) * time.Minute)
+			shutdownErr := s.Shutdown()
+			if shutdownErr != nil {
+				log.Fatalf("Could not shutdown: %v", shutdownErr)
+			}
+		}
+	})
+	if err != nil {
+		log.Fatalf("Could not watch Game Server events, %v", err)
+	}
 }
 
 func readWriteLoop(conn net.PacketConn, stop chan struct{}, s *sdk.SDK) {
@@ -122,7 +145,16 @@ func readWriteLoop(conn net.PacketConn, stop chan struct{}, s *sdk.SDK) {
 			allocate(s)
 
 		case "RESERVE":
-			reserve(s)
+			if len(parts) != 2 {
+				respond(conn, sender, "ERROR: Invalid RESERVE, should have 1 argument\n")
+				continue
+			}
+			if dur, err := time.ParseDuration(parts[1]); err != nil {
+				respond(conn, sender, fmt.Sprintf("ERROR: %s\n", err))
+				continue
+			} else {
+				reserve(s, dur)
+			}
 
 		case "WATCH":
 			watchGameServerEvents(s)
@@ -154,6 +186,52 @@ func readWriteLoop(conn net.PacketConn, stop chan struct{}, s *sdk.SDK) {
 				respond(conn, sender, "ERROR: Invalid ANNOTATION command, must use zero or 2 arguments\n")
 				continue
 			}
+		case "PLAYER_CAPACITY":
+			switch len(parts) {
+			case 1:
+				respond(conn, sender, getPlayerCapacity(s))
+				continue
+			case 2:
+				if cap, err := strconv.Atoi(parts[1]); err != nil {
+					respond(conn, sender, fmt.Sprintf("ERROR: %s\n", err))
+					continue
+				} else {
+					setPlayerCapacity(s, int64(cap))
+				}
+			default:
+				respond(conn, sender, "ERROR: Invalid PLAYER_CAPACITY, should have 0 or 1 arguments\n")
+				continue
+			}
+
+		case "PLAYER_CONNECT":
+			if len(parts) < 2 {
+				respond(conn, sender, "ERROR: Invalid PLAYER_CONNECT, should have 1 arguments\n")
+				continue
+			}
+			playerConnect(s, parts[1])
+
+		case "PLAYER_DISCONNECT":
+			if len(parts) < 2 {
+				respond(conn, sender, "ERROR: Invalid PLAYER_CONNECT, should have 1 arguments\n")
+				continue
+			}
+			playerDisconnect(s, parts[1])
+
+		case "PLAYER_CONNECTED":
+			if len(parts) < 2 {
+				respond(conn, sender, "ERROR: Invalid PLAYER_CONNECTED, should have 1 arguments\n")
+				continue
+			}
+			respond(conn, sender, playerIsConnected(s, parts[1]))
+			continue
+
+		case "GET_PLAYERS":
+			respond(conn, sender, getConnectedPlayers(s))
+			continue
+
+		case "PLAYER_COUNT":
+			respond(conn, sender, getPlayerCount(s))
+			continue
 		}
 
 		respond(conn, sender, "ACK: "+txt+"\n")
@@ -177,8 +255,8 @@ func allocate(s *sdk.SDK) {
 }
 
 // reserve for 10 seconds
-func reserve(s *sdk.SDK) {
-	if err := s.Reserve(10 * time.Second); err != nil {
+func reserve(s *sdk.SDK, duration time.Duration) {
+	if err := s.Reserve(duration); err != nil {
 		log.Fatalf("could not reserve gameserver: %v", err)
 	}
 }
@@ -260,6 +338,73 @@ func setLabel(s *sdk.SDK, key, value string) {
 	if err != nil {
 		log.Fatalf("could not set label: %v", err)
 	}
+}
+
+// setPlayerCapacity sets the player capacity to the given value
+func setPlayerCapacity(s *sdk.SDK, capacity int64) {
+	log.Printf("Setting Player Capacity to %d", capacity)
+	if err := s.Alpha().SetPlayerCapacity(capacity); err != nil {
+		log.Fatalf("could not set capacity: %v", err)
+	}
+}
+
+// getPlayerCapacity returns the current player capacity as a string
+func getPlayerCapacity(s *sdk.SDK) string {
+	log.Print("Getting Player Capacity")
+	capacity, err := s.Alpha().GetPlayerCapacity()
+	if err != nil {
+		log.Fatalf("could not get capacity: %v", err)
+	}
+	return strconv.FormatInt(capacity, 10) + "\n"
+}
+
+// playerConnect connects a given player
+func playerConnect(s *sdk.SDK, id string) {
+	log.Printf("Connecting Player: %s", id)
+	if _, err := s.Alpha().PlayerConnect(id); err != nil {
+		log.Fatalf("could not connect player: %v", err)
+	}
+}
+
+// playerDisconnect disconnects a given player
+func playerDisconnect(s *sdk.SDK, id string) {
+	log.Printf("Disconnecting Player: %s", id)
+	if _, err := s.Alpha().PlayerDisconnect(id); err != nil {
+		log.Fatalf("could not disconnect player: %v", err)
+	}
+}
+
+// playerIsConnected returns a bool as a string if a player is connected
+func playerIsConnected(s *sdk.SDK, id string) string {
+	log.Printf("Checking if player %s is connected", id)
+
+	connected, err := s.Alpha().IsPlayerConnected(id)
+	if err != nil {
+		log.Fatalf("could not retrieve if player is connected: %v", err)
+	}
+
+	return strconv.FormatBool(connected) + "\n"
+}
+
+// getConnectedPlayers returns a comma delimeted list of connected players
+func getConnectedPlayers(s *sdk.SDK) string {
+	log.Print("Retrieving connected player list")
+	list, err := s.Alpha().GetConnectedPlayers()
+	if err != nil {
+		log.Fatalf("could not retrieve connected players: %s", err)
+	}
+
+	return strings.Join(list, ",") + "\n"
+}
+
+// getPlayerCount returns the count of connected players as a string
+func getPlayerCount(s *sdk.SDK) string {
+	log.Print("Retrieving connected player count")
+	count, err := s.Alpha().GetPlayerCount()
+	if err != nil {
+		log.Fatalf("could not retrieve player count: %s", err)
+	}
+	return strconv.FormatInt(count, 10) + "\n"
 }
 
 // doHealth sends the regular Health Pings

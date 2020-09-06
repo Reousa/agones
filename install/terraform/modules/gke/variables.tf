@@ -22,13 +22,22 @@ variable "ports" {
 # It is crucial to set valid ProjectID for "project".
 variable "cluster" {
   description = "Set of GKE cluster parameters."
-  type        = "map"
+  type        = map
 
   default = {
-    "zone"             = "us-west1-c"
-    "name"             = "test-cluster"
-    "machineType"      = "n1-standard-4"
-    "initialNodeCount" = "4"
-    "project"          = "agones"
+    "zone"              = "us-west1-c"
+    "name"              = "test-cluster"
+    "machineType"       = "n1-standard-4"
+    "initialNodeCount"  = "4"
+    "project"           = "agones"
+    "network"           = "default"
+    "subnetwork"        = ""
+    "kubernetesVersion" = "1.16"
   }
+}
+
+variable "firewallName" {
+  description = "name for the cluster firewall. Defaults to 'game-server-firewall-{local.name}' if not set."
+  type        = string
+  default     = ""
 }

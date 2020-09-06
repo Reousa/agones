@@ -49,9 +49,9 @@ site-gen-app-yaml:
 
 site-deploy: site-gen-app-yaml site-static
 	docker run -t --rm $(common_mounts) --workdir=$(mount_path) $(DOCKER_RUN_ARGS) \
-	 -e GOPATH=/tmp/go -e GO111MODULE=off -e SHORT_SHA=$(shell git rev-parse --short=7 HEAD) $(build_tag) bash -c \
-	'printenv && mkdir -p $$GOPATH/src && cp -r ./site $$GOPATH/src && cp -r ./vendor/gopkg.in $$GOPATH/src && \
-	cd $$GOPATH/src/site && gcloud app deploy .app.yaml --no-promote --quiet --version=$$SHORT_SHA'
+	-e GO111MODULE=on -e SHORT_SHA=$(shell git rev-parse --short=7 HEAD) $(build_tag) bash -c \
+	'printenv && cd  ./site && \
+    gcloud app deploy .app.yaml --no-promote --quiet --version=$$SHORT_SHA'
 
 site-static-preview:
 	$(MAKE) site-static ARGS="-F" ENV="RELEASE_VERSION=$(base_version) RELEASE_BRANCH=master"
@@ -59,10 +59,12 @@ site-static-preview:
 site-deploy-preview: site-static-preview
 	$(MAKE) site-deploy SERVICE=preview
 
-hugo-test:
-	$(MAKE) site-static-preview
-	docker run --rm -t -e "TERM=xterm-256color" $(common_mounts) $(DOCKER_RUN_ARGS) $(build_tag) bash -c \
-		"mkdir -p /tmp/website && cp -r $(mount_path)/site/public /tmp/website/site && htmltest -c $(mount_path)/site/htmltest.yaml /tmp/website"
+hugo-test: site-static-preview
+	for i in 1 2 3 4 5; \
+		do echo "Html Test: Attempt $$i" && \
+		  docker run --rm -t -e "TERM=xterm-256color" $(common_mounts) $(DOCKER_RUN_ARGS) $(build_tag) bash -c \
+			"mkdir -p /tmp/website && cp -r $(mount_path)/site/public /tmp/website/site && htmltest -c $(mount_path)/site/htmltest.yaml /tmp/website" && \
+	break || sleep 60 && false; done
 
 site-test:
 	# generate actual html and run test against - provides a more accurate tests

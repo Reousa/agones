@@ -12,14 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-const EventEmitter = require('events');
+const stream = require('stream');
 
-const grpc = require('grpc');
+const grpc = require('@grpc/grpc-js');
 
 const messages = require('../lib/sdk_pb');
-const AgonesSDK = require('../src/agonesSDK');
 
-describe('agones', () => {
+const AgonesSDK = require('../src/agonesSDK');
+const Alpha = require('../src/alpha');
+
+describe('AgonesSDK', () => {
 	let agonesSDK;
 
 	beforeEach(() => {
@@ -36,12 +38,14 @@ describe('agones', () => {
 			process.env.AGONES_SDK_GRPC_PORT = '6789';
 			let port = agonesSDK.port;
 			expect(port).toEqual('6789');
+			delete process.env.AGONES_SDK_GRPC_PORT;
 		});
 
 		it('returns an invalid port set in $AGONES_SDK_GRPC_PORT', async () => {
 			process.env.AGONES_SDK_GRPC_PORT = 'foo';
 			let port = agonesSDK.port;
 			expect(port).toEqual('foo');
+			delete process.env.AGONES_SDK_GRPC_PORT;
 		});
 	});
 
@@ -70,31 +74,6 @@ describe('agones', () => {
 		});
 	});
 
-	describe('allocate', () => {
-		it('calls the server and handles success', async () => {
-			spyOn(agonesSDK.client, 'allocate').and.callFake((request, callback) => {
-				let result = new messages.Empty();
-				callback(undefined, result);
-			});
-			let result = await agonesSDK.allocate();
-			expect(agonesSDK.client.allocate).toHaveBeenCalled();
-			expect(result).toEqual({});
-		});
-
-		it('calls the server and handles failure', async () => {
-			spyOn(agonesSDK.client, 'allocate').and.callFake((request, callback) => {
-				callback('error', undefined);
-			});
-			try {
-				await agonesSDK.allocate();
-				fail();
-			} catch (error) {
-				expect(agonesSDK.client.allocate).toHaveBeenCalled();
-				expect(error).toEqual('error');
-			}
-		});
-	});
-
 	describe('ready', () => {
 		it('calls the server and handles success', async () => {
 			spyOn(agonesSDK.client, 'ready').and.callFake((request, callback) => {
@@ -115,6 +94,31 @@ describe('agones', () => {
 				fail();
 			} catch (error) {
 				expect(agonesSDK.client.ready).toHaveBeenCalled();
+				expect(error).toEqual('error');
+			}
+		});
+	});
+
+	describe('allocate', () => {
+		it('calls the server and handles success', async () => {
+			spyOn(agonesSDK.client, 'allocate').and.callFake((request, callback) => {
+				let result = new messages.Empty();
+				callback(undefined, result);
+			});
+			let result = await agonesSDK.allocate();
+			expect(agonesSDK.client.allocate).toHaveBeenCalled();
+			expect(result).toEqual({});
+		});
+
+		it('calls the server and handles failure', async () => {
+			spyOn(agonesSDK.client, 'allocate').and.callFake((request, callback) => {
+				callback('error', undefined);
+			});
+			try {
+				await agonesSDK.allocate();
+				fail();
+			} catch (error) {
+				expect(agonesSDK.client.allocate).toHaveBeenCalled();
 				expect(error).toEqual('error');
 			}
 		});
@@ -229,9 +233,9 @@ describe('agones', () => {
 
 	describe('watchGameServer', () => {
 		it('calls the server and passes events to the callback', async () => {
-			let serverEmitter = new EventEmitter();
+			let serverStream = stream.Readable({read: () => undefined});
 			spyOn(agonesSDK.client, 'watchGameServer').and.callFake(() => {
-				return serverEmitter;
+				return serverStream;
 			});
 
 			let callback = jasmine.createSpy('callback');
@@ -242,7 +246,7 @@ describe('agones', () => {
 			status.setState('up');
 			let gameServer = new messages.GameServer();
 			gameServer.setStatus(status);
-			serverEmitter.emit('data', gameServer);
+			serverStream.emit('data', gameServer);
 
 			expect(callback).toHaveBeenCalled();
 			let result = callback.calls.argsFor(0)[0];
@@ -250,16 +254,16 @@ describe('agones', () => {
 			expect(result.status.state).toEqual('up');
 		});
 		it('captures CANCELLED errors only', async() => {
-			let serverEmitter = new EventEmitter();
+			let serverStream = stream.Readable({read: () => undefined});
 			spyOn(agonesSDK.client, 'watchGameServer').and.callFake(() => {
-				return serverEmitter;
+				return serverStream;
 			});
 
 			let callback = jasmine.createSpy('callback');
 			agonesSDK.watchGameServer(callback);
 
 			try {
-				serverEmitter.emit('error', {
+				serverStream.emit('error', {
 					code: grpc.status.CANCELLED
 				});
 			} catch (error) {
@@ -267,7 +271,7 @@ describe('agones', () => {
 			}
 
 			try {
-				serverEmitter.emit('error', {
+				serverStream.emit('error', {
 					code: grpc.status.ABORTED
 				});
 				fail();
@@ -361,21 +365,21 @@ describe('agones', () => {
 			await agonesSDK.close();
 			expect(agonesSDK.client.close).toHaveBeenCalled();
 		});
-		it('destroys the health stream if set', async () => {
-			let stream = jasmine.createSpyObj('stream', ['destroy', 'write']);
+		it('ends the health stream if set', async () => {
+			let stream = jasmine.createSpyObj('stream', ['end', 'write']);
 			spyOn(agonesSDK.client, 'health').and.callFake(() => {
 				return stream;
 			});
 			agonesSDK.health();
 			spyOn(agonesSDK.client, 'close').and.callFake(() => {});
 			await agonesSDK.close();
-			expect(stream.destroy).toHaveBeenCalled();
+			expect(stream.end).toHaveBeenCalled();
 		});
 		it('cancels any watchers', async () => {
-			let serverEmitter = new EventEmitter();
-			serverEmitter.call = jasmine.createSpyObj('call', ['cancel']);
+			let serverStream = stream.Readable({read: () => undefined});
+			spyOn(serverStream, 'destroy').and.callThrough();
 			spyOn(agonesSDK.client, 'watchGameServer').and.callFake(() => {
-				return serverEmitter;
+				return serverStream;
 			});
 
 			let callback = jasmine.createSpy('callback');
@@ -383,7 +387,7 @@ describe('agones', () => {
 
 			spyOn(agonesSDK.client, 'close');
 			await agonesSDK.close();
-			expect(serverEmitter.call.cancel).toHaveBeenCalled();
+			expect(serverStream.destroy).toHaveBeenCalled();
 		});
 	});
 
@@ -413,6 +417,12 @@ describe('agones', () => {
 				expect(agonesSDK.client.reserve).toHaveBeenCalled();
 				expect(error).toEqual('error');
 			}
+		});
+	});
+
+	describe('alpha', () => {
+		it('returns the alpha features class', () => {
+			expect(agonesSDK.alpha).toBeInstanceOf(Alpha);
 		});
 	});
 });

@@ -1,20 +1,16 @@
 ---
 title: "Allocator Service"
-date: 2019-10-25T05:45:05Z
-version: "v1alpha1"
+date: 2020-05-19T05:45:05Z
+publishDate: 2019-10-25T05:45:05Z
 description: >
   Agones provides an mTLS based allocator service that is accessible from outside the cluster using a load balancer. The service is deployed and scales independent to Agones controller.
 ---
 
-{{< alert title="Alpha" color="warning">}}
-This feature is in a pre-release state and might change.
-{{< /alert >}}
+To allocate a game server, Agones in addition to {{< ghlink href="pkg/apis/allocation/v1/gameserverallocation.go" >}}GameServerAllocations{{< /ghlink >}}, provides a gRPC service with mTLS authentication, called agones-allocator, which is on {{< ghlink href="proto/allocation" >}}stable version{{< /ghlink >}}, starting on agones v1.6.
 
-To allocate a game server, Agones in addition to [GameServerAllocations](https://github.com/googleforgames/agones/blob/master/pkg/apis/allocation/v1/gameserverallocation.go), provides a REST API service with mTLS authentication, called agones-allocator, which is on [v1alpha1 version](https://github.com/googleforgames/agones/blob/master/proto/allocation/v1alpha1), starting on agones v1.1.
+The gRPC service is accessible through a Kubernetes service that is externalized using a load balancer. For the gRPC request to succeed, a client certificate must be provided that is in the authorization list of the allocator service.
 
-The REST API service is accessible through a Kubernetes service that is externalized using a load balancer. For the http request to succeed, a client certificate must be provided that is in the authorization list of the allocator service.
-
-The remainder of this article describes how to manually make a successful allocation request using the REST API.
+The remainder of this article describes how to manually make a successful allocation request using the gRPC API.
 
 ## Find the external IP
 
@@ -31,47 +27,64 @@ NAME                        TYPE           CLUSTER-IP      <b>EXTERNAL-IP</b>   
 agones-allocator            LoadBalancer   10.55.251.73    <b>34.82.195.204</b>   443:30250/TCP      7d22h
 </pre>
 
-Store the IP in a variable to use as the server endpoint in the next sections:
-
-```bash
-EXTERNAL_IP=`kubectl get services agones-allocator -n agones-system -o jsonpath='{.status.loadBalancer.ingress[0].ip}'`
-```
-
 ## Server TLS certificate
 
-Replace the default server TLS certificate with a certificate with CN and subjectAltName. There are multiple approaches to generate a certificate, including using CA. The following provides an example of generating a self-signed certificate using openssl.
+{{% feature publishVersion="1.9.0" %}}
+If the `agones-allocator` service is installed as a `LoadBalancer` [using a static IP]({{< relref "/docs/Installation/Install Agones/helm.md#reserved-allocator-load-balancer-ip" >}}), a valid self-signed server TLS certificate is generated using the IP provided. Otherwise, the server TLS certificate should be replaced.
+{{% /feature %}}
+
+Replace the default server TLS certificate with a certificate with CN and subjectAltName. There are multiple approaches to generate a certificate. Agones recommends using [cert-manager.io](https://cert-manager.io/) solution for cluster level certificate management.
+
+In order to use cert-manager solution, first, [install cert-manager](https://cert-manager.io/docs/installation/kubernetes/) on the cluster. Then, [configure](https://cert-manager.io/docs/configuration/) an `Issuer`/`ClusterIssuer` resource and last configure a `Certificate` resource to manage allocator-tls `Secret`.
+
+Here is an example of using a self-signed `ClusterIssuer` for configuring allocator-tls `Secret`:
 
 ```bash
 #!/bin/bash
+# Create a self-signed ClusterIssuer
+cat <<EOF | kubectl apply -f -
+apiVersion: cert-manager.io/v1alpha2
+kind: ClusterIssuer
+metadata:
+  name: selfsigned
+spec:
+  selfSigned: {}
+EOF
 
-TLS_KEY_FILE=tls.key
-TLS_CERT_FILE=tls.crt
+EXTERNAL_IP=`kubectl get services agones-allocator -n agones-system -o jsonpath='{.status.loadBalancer.ingress[0].ip}'`
 
-cat /etc/ssl/openssl.cnf <(printf "\n[SAN]\nsubjectAltName=IP:${EXTERNAL_IP}") > openssl.cnf
+# Create a Certificate with IP for the allocator-tls secret
+cat <<EOF | kubectl apply -f -
+apiVersion: cert-manager.io/v1alpha2
+kind: Certificate
+metadata:
+  name: allocator-selfsigned-cert
+  namespace: agones-system
+spec:
+  commonName: ${EXTERNAL_IP}
+  ipAddresses:
+    - ${EXTERNAL_IP}
+  secretName: allocator-tls
+  issuerRef:
+    name: selfsigned
+    kind: ClusterIssuer
+EOF
 
-openssl req -nodes -new -newkey rsa:2048 \
-    -keyout ${TLS_KEY_FILE} \
-    -out tls.csr \
-    -subj "/CN=${EXTERNAL_IP}/O=${EXTERNAL_IP}" \
-    -reqexts SAN \
-    -config openssl.cnf
+# Optional: Store the secret ca.crt in a file to be used by the client for the server authentication
+TLS_CA_FILE=ca.crt
+TLS_CA_VALUE=`kubectl get secret allocator-tls -n agones-system -ojsonpath='{.data.ca\.crt}'`
+echo ${TLS_CA_VALUE} | base64 -d > ${TLS_CA_FILE}
 
-openssl x509 -req -days 365 -in tls.csr \
-    -signkey ${TLS_KEY_FILE} \
-    -out ${TLS_CERT_FILE} \
-    -extensions SAN \
-    -extfile openssl.cnf
-```
+# In case of MacOS
+# echo ${TLS_CA_VALUE} | base64 -D > ${TLS_CA_FILE}
 
-After having the TLS certificates ready, run the following command to store the certificate as a Kubernetes TLS secret.
-
-```bash
-kubectl create secret --save-config=true tls allocator-tls -n agones-system --key=${TLS_KEY_FILE} --cert=${TLS_CERT_FILE} --dry-run -o yaml | kubectl apply -f -
+# Add ca.crt to the allocator-tls-ca Secret
+kubectl get secret allocator-tls-ca -o json -n agones-system | jq '.data["tls-ca.crt"]="'${TLS_CA_VALUE}'"' | kubectl apply -f -
 ```
 
 ## Client Certificate
 
-Because agones-allocator uses an mTLS authentication mechanism, client must provide a certificate that is accepted by the server. Here is an example of generating a client certificate:
+Because agones-allocator uses an mTLS authentication mechanism, client must provide a certificate that is accepted by the server. Here is an example of generating a client certificate. For the agones-allocator service to accept the newly generate client certificate, the generated client certificate CA or public portion of the certificate must be added to a kubernetes secret called `allocator-client-ca`.
 
 ```bash
 #!/bin/bash
@@ -85,42 +98,32 @@ CERT_FILE_VALUE=`cat ${CERT_FILE} | base64 -w 0`
 
 # In case of MacOS
 # CERT_FILE_VALUE=`cat ${CERT_FILE} | base64`
-```
 
-### White-list client certificate
-
-For the agones-allocator service to accept the newly generate client certificate, the generated client certificate CA or public portion of the certificate must be added to a kubernetes secret called `allocator-client-ca`.
-
-```bash
+# white-list client certificate
 kubectl get secret allocator-client-ca -o json -n agones-system | jq '.data["client_trial.crt"]="'${CERT_FILE_VALUE}'"' | kubectl apply -f -
 ```
 
-This command creates a new entry in the secret data map called `client_trial.crt` for `allocator-client-ca` and stores it. You can also achieve this by `kubectl edit secret allocator-client-ca -n agones-system`, and then add the entry.
-
-## Restart pods
-
-Restart pods to get the new TLS certificate loaded to the agones-allocator service.
-
-```bash
-kubectl get pods -n agones-system -o=name | grep agones-allocator | xargs kubectl delete -n agones-system
-```
+The last command creates a new entry in the secret data map called `client_trial.crt` for `allocator-client-ca` and stores it. You can also achieve this by `kubectl edit secret allocator-client-ca -n agones-system`, and then add the entry.
 
 ## Send allocation request
 
-Now the service is ready to accept requests from the client with the generated certificates. Create a [fleet](https://agones.dev/site/docs/getting-started/create-fleet/#1-create-a-fleet) and send an HTTP request to agones-allocator by providing fleet's name and the namespace to which it is deployed, set in the JSON [body](https://github.com/googleforgames/agones/blob/master/proto/allocation/v1alpha1/allocation.proto).
+Now the service is ready to accept requests from the client with the generated certificates. Create a [fleet]({{< ref "/docs/Getting Started/create-fleet.md" >}}) and send a gRPC request to agones-allocator. To start, take a look at the allocation gRPC client examples in {{< ghlink href="examples/allocator-client/main.go" >}}golang{{< /ghlink >}} and {{< ghlink href="examples/allocator-client-csharp/Program.cs" >}}C#{{< /ghlink >}} languages. In the following, the {{< ghlink href="examples/allocator-client/main.go" >}}golang gRPC client example{{< /ghlink >}} is used to allocate a Game Server in the default namespace.
 
 ```bash
 #!/bin/bash
 
-NAMESPACE=<namespace>
-FLEET_NAME=<fleet name>
+NAMESPACE=default # replace with any namespace
+EXTERNAL_IP=`kubectl get services agones-allocator -n agones-system -o jsonpath='{.status.loadBalancer.ingress[0].ip}'`
+KEY_FILE=client.key
+CERT_FILE=client.crt
+TLS_CA_FILE=ca.crt
 
-curl https://${EXTERNAL_IP}:443/v1alpha1/gameserverallocation \
-    --header "Content-Type: application/json" \
-    -d '{"namespace": "'${NAMESPACE}'", "requiredGameServerSelector": {"matchLabels": {"agones.dev/fleet": "'${FLEET_NAME}'"}}}' \
+go run examples/allocator-client/main.go --ip ${EXTERNAL_IP} \
+    --port 443 \
+    --namespace ${NAMESPACE} \
     --key ${KEY_FILE} \
     --cert ${CERT_FILE} \
-    --cacert ${TLS_CERT_FILE} -v
+    --cacert ${TLS_CA_FILE}
 ```
 
-If your matchmaker is external to the cluster on which your game servers are hosted, agones-allocator provides the HTTP API (and gRPC in future) to allocate game services using mTLS authentication, which can scale independent to agones controller.
+If your matchmaker is external to the cluster on which your game servers are hosted, the `agones-allocator` provides the gRPC API to allocate game services using mTLS authentication, which can scale independently to the Agones controller.

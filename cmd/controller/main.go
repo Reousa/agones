@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"agones.dev/agones/pkg"
+	agonesv1 "agones.dev/agones/pkg/apis/agones/v1"
 	"agones.dev/agones/pkg/client/clientset/versioned"
 	"agones.dev/agones/pkg/client/informers/externalversions"
 	"agones.dev/agones/pkg/fleetautoscalers"
@@ -44,6 +45,7 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"gopkg.in/natefinch/lumberjack.v2"
+	corev1 "k8s.io/api/core/v1"
 	extclientset "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/client-go/informers"
@@ -59,6 +61,8 @@ const (
 	sidecarImageFlag             = "sidecar-image"
 	sidecarCPURequestFlag        = "sidecar-cpu-request"
 	sidecarCPULimitFlag          = "sidecar-cpu-limit"
+	sidecarMemoryRequestFlag     = "sidecar-memory-request"
+	sidecarMemoryLimitFlag       = "sidecar-memory-limit"
 	sdkServerAccountFlag         = "sdk-service-account"
 	pullSidecarFlag              = "always-pull-sidecar"
 	minPortFlag                  = "min-port"
@@ -117,8 +121,11 @@ func main() {
 	logger.WithField("version", pkg.Version).WithField("featureGates", runtime.EncodeFeatures()).
 		WithField("ctlConf", ctlConf).Info("starting gameServer operator...")
 
-	if err := ctlConf.validate(); err != nil {
-		logger.WithError(err).Fatal("Could not create controller from environment or flags")
+	if errs := ctlConf.validate(); len(errs) != 0 {
+		for _, err := range errs {
+			logger.Error(err)
+		}
+		logger.Fatal("Could not create controller from environment or flags")
 	}
 
 	// if the kubeconfig fails BuildConfigFromFlags will try in cluster config
@@ -196,7 +203,8 @@ func main() {
 
 	gsController := gameservers.NewController(wh, health,
 		ctlConf.MinPort, ctlConf.MaxPort, ctlConf.SidecarImage, ctlConf.AlwaysPullSidecar,
-		ctlConf.SidecarCPURequest, ctlConf.SidecarCPULimit, ctlConf.SdkServiceAccount,
+		ctlConf.SidecarCPURequest, ctlConf.SidecarCPULimit,
+		ctlConf.SidecarMemoryRequest, ctlConf.SidecarMemoryLimit, ctlConf.SdkServiceAccount,
 		kubeClient, kubeInformerFactory, extClient, agonesClient, agonesInformerFactory)
 	gsSetController := gameserversets.NewController(wh, health, gsCounter,
 		kubeClient, extClient, agonesClient, agonesInformerFactory)
@@ -235,10 +243,12 @@ func parseEnvFlags() config {
 	viper.SetDefault(sidecarImageFlag, "gcr.io/agones-images/agones-sdk:"+pkg.Version)
 	viper.SetDefault(sidecarCPURequestFlag, "0")
 	viper.SetDefault(sidecarCPULimitFlag, "0")
+	viper.SetDefault(sidecarMemoryRequestFlag, "0")
+	viper.SetDefault(sidecarMemoryLimitFlag, "0")
 	viper.SetDefault(pullSidecarFlag, false)
 	viper.SetDefault(sdkServerAccountFlag, "agones-sdk")
-	viper.SetDefault(certFileFlag, filepath.Join(base, "certs/server.crt"))
-	viper.SetDefault(keyFileFlag, filepath.Join(base, "certs/server.key"))
+	viper.SetDefault(certFileFlag, filepath.Join(base, "certs", "server.crt"))
+	viper.SetDefault(keyFileFlag, filepath.Join(base, "certs", "server.key"))
 	viper.SetDefault(enablePrometheusMetricsFlag, true)
 	viper.SetDefault(enableStackdriverMetricsFlag, false)
 	viper.SetDefault(stackdriverLabels, "")
@@ -254,6 +264,8 @@ func parseEnvFlags() config {
 	pflag.String(sidecarImageFlag, viper.GetString(sidecarImageFlag), "Flag to overwrite the GameServer sidecar image that is used. Can also use SIDECAR env variable")
 	pflag.String(sidecarCPULimitFlag, viper.GetString(sidecarCPULimitFlag), "Flag to overwrite the GameServer sidecar container's cpu limit. Can also use SIDECAR_CPU_LIMIT env variable")
 	pflag.String(sidecarCPURequestFlag, viper.GetString(sidecarCPURequestFlag), "Flag to overwrite the GameServer sidecar container's cpu request. Can also use SIDECAR_CPU_REQUEST env variable")
+	pflag.String(sidecarMemoryLimitFlag, viper.GetString(sidecarMemoryLimitFlag), "Flag to overwrite the GameServer sidecar container's memory limit. Can also use SIDECAR_MEMORY_LIMIT env variable")
+	pflag.String(sidecarMemoryRequestFlag, viper.GetString(sidecarMemoryRequestFlag), "Flag to overwrite the GameServer sidecar container's memory request. Can also use SIDECAR_MEMORY_REQUEST env variable")
 	pflag.Bool(pullSidecarFlag, viper.GetBool(pullSidecarFlag), "For development purposes, set the sidecar image to have a ImagePullPolicy of Always. Can also use ALWAYS_PULL_SIDECAR env variable")
 	pflag.String(sdkServerAccountFlag, viper.GetString(sdkServerAccountFlag), "Overwrite what service account default for GameServer Pods. Defaults to Can also use SDK_SERVICE_ACCOUNT")
 	pflag.Int32(minPortFlag, 0, "Required. The minimum port that that a GameServer can be allocated to. Can also use MIN_PORT env variable.")
@@ -278,6 +290,8 @@ func parseEnvFlags() config {
 	runtime.Must(viper.BindEnv(sidecarImageFlag))
 	runtime.Must(viper.BindEnv(sidecarCPULimitFlag))
 	runtime.Must(viper.BindEnv(sidecarCPURequestFlag))
+	runtime.Must(viper.BindEnv(sidecarMemoryLimitFlag))
+	runtime.Must(viper.BindEnv(sidecarMemoryRequestFlag))
 	runtime.Must(viper.BindEnv(pullSidecarFlag))
 	runtime.Must(viper.BindEnv(sdkServerAccountFlag))
 	runtime.Must(viper.BindEnv(minPortFlag))
@@ -300,22 +314,34 @@ func parseEnvFlags() config {
 
 	runtime.Must(runtime.ParseFeaturesFromEnv())
 
-	request, err := resource.ParseQuantity(viper.GetString(sidecarCPURequestFlag))
+	requestCPU, err := resource.ParseQuantity(viper.GetString(sidecarCPURequestFlag))
 	if err != nil {
 		logger.WithError(err).Fatalf("could not parse %s", sidecarCPURequestFlag)
 	}
 
-	limit, err := resource.ParseQuantity(viper.GetString(sidecarCPULimitFlag))
+	limitCPU, err := resource.ParseQuantity(viper.GetString(sidecarCPULimitFlag))
 	if err != nil {
 		logger.WithError(err).Fatalf("could not parse %s", sidecarCPULimitFlag)
+	}
+
+	requestMemory, err := resource.ParseQuantity(viper.GetString(sidecarMemoryRequestFlag))
+	if err != nil {
+		logger.WithError(err).Fatalf("could not parse %s", sidecarMemoryRequestFlag)
+	}
+
+	limitMemory, err := resource.ParseQuantity(viper.GetString(sidecarMemoryLimitFlag))
+	if err != nil {
+		logger.WithError(err).Fatalf("could not parse %s", sidecarMemoryLimitFlag)
 	}
 
 	return config{
 		MinPort:               int32(viper.GetInt64(minPortFlag)),
 		MaxPort:               int32(viper.GetInt64(maxPortFlag)),
 		SidecarImage:          viper.GetString(sidecarImageFlag),
-		SidecarCPURequest:     request,
-		SidecarCPULimit:       limit,
+		SidecarCPURequest:     requestCPU,
+		SidecarCPULimit:       limitCPU,
+		SidecarMemoryRequest:  requestMemory,
+		SidecarMemoryLimit:    limitMemory,
 		SdkServiceAccount:     viper.GetString(sdkServerAccountFlag),
 		AlwaysPullSidecar:     viper.GetBool(pullSidecarFlag),
 		KeyFile:               viper.GetString(keyFileFlag),
@@ -341,6 +367,8 @@ type config struct {
 	SidecarImage          string
 	SidecarCPURequest     resource.Quantity
 	SidecarCPULimit       resource.Quantity
+	SidecarMemoryRequest  resource.Quantity
+	SidecarMemoryLimit    resource.Quantity
 	SdkServiceAccount     string
 	AlwaysPullSidecar     bool
 	PrometheusMetrics     bool
@@ -359,14 +387,19 @@ type config struct {
 }
 
 // validate ensures the ctlConfig data is valid.
-func (c *config) validate() error {
+func (c *config) validate() []error {
+	validationErrors := make([]error, 0)
 	if c.MinPort <= 0 || c.MaxPort <= 0 {
-		return errors.New("min Port and Max Port values are required")
+		validationErrors = append(validationErrors, errors.New("min Port and Max Port values are required"))
 	}
 	if c.MaxPort < c.MinPort {
-		return errors.New("max Port cannot be set less that the Min Port")
+		validationErrors = append(validationErrors, errors.New("max Port cannot be set less that the Min Port"))
 	}
-	return nil
+	resourceErrors := agonesv1.ValidateResource(c.SidecarCPURequest, c.SidecarCPULimit, corev1.ResourceCPU)
+	validationErrors = append(validationErrors, resourceErrors...)
+	resourceErrors = agonesv1.ValidateResource(c.SidecarMemoryRequest, c.SidecarMemoryLimit, corev1.ResourceMemory)
+	validationErrors = append(validationErrors, resourceErrors...)
+	return validationErrors
 }
 
 type runner interface {

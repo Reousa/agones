@@ -9,10 +9,6 @@ description: "This is the Node.js version of the Agones Game Server Client SDK."
 
 Check the [Client SDK Documentation]({{< relref "_index.md" >}}) for more details on each of the SDK functions and how to run the SDK locally.
 
-## Download
-
-Download the source {{< ghlink href="sdks/nodejs" >}}directly from GitHub{{< /ghlink >}}.
-
 ## Prerequisites
 
 - Node.js >= 10.13.0
@@ -22,13 +18,16 @@ Download the source {{< ghlink href="sdks/nodejs" >}}directly from GitHub{{< /gh
 Add the agones dependency to your project:
 
 ```sh
-$ npm install @googleforgames/agones
+$ npm install @google-cloud/agones-sdk
 ```
+
+If you need to download the source, rather than install from NPM, you can find it on 
+{{< ghlink href="sdks/nodejs" >}}GitHub{{< /ghlink >}}.
 
 To begin working with the SDK, create an instance of it.
 
 ```javascript
-const AgonesSDK = require('@googleforgames/agones');
+const AgonesSDK = require('@google-cloud/agones-sdk');
 
 let agonesSDK = new AgonesSDK();
 ```
@@ -54,23 +53,15 @@ let result = await agonesSDK.ready();
 
 Similarly `shutdown()`, `allocate()`, `setAnnotation(key, value)` and `setLabel(key, value)` are async methods that perform an action and return an empty result.
 
-{{% feature expiryVersion="1.4.0" %}}
 To get [details of the backing GameServer]({{< relref "_index.md#gameserver" >}}) call the async method
 `getGameServer()`. The result will be an object representing `GameServer` defined
-in {{< ghlink href="sdk.proto" >}}`sdk.proto`{{< /ghlink >}}.
-{{% /feature %}}
-
-{{% feature publishVersion="1.4.0" %}}
-To get [details of the backing GameServer]({{< relref "_index.md#gameserver" >}}) call the async method
-`getGameServer()`. The result will be an object representing `GameServer` defined
-in {{< ghlink href="proto/sdk/sdk.proto" link_test="false" >}}`sdk.proto`{{< /ghlink >}}.
-{{% /feature %}}
+in {{< ghlink href="proto/sdk/sdk.proto" >}}`sdk.proto`{{< /ghlink >}}.
 
 ```javascript
 let result = await agonesSDK.getGameServer();
 ```
 
-To get [updates on the backing GameServer]({{< relref "_index.md#watchgameserver-function-gameserver" >}}) as they happen, call `watchGameServer(callback)`. The callback will be called with a parameter matching the result of `getGameServer()`.
+To get [updates on the backing GameServer]({{< relref "_index.md#watchgameserverfunctiongameserver" >}}) as they happen, call `watchGameServer(callback)`. The callback will be called with a parameter matching the result of `getGameServer()`.
 
 ```javascript
 agonesSDK.watchGameServer((result) => {
@@ -78,6 +69,6 @@ agonesSDK.watchGameServer((result) => {
 });
 ```
 
-To mark the game server as [reserved]({{< relref "_index.md#reserve-seconds" >}}) for a period of time, call the async method `reserve(seconds)`. The result will be an empty object.
+To mark the game server as [reserved]({{< relref "_index.md#reserveseconds" >}}) for a period of time, call the async method `reserve(seconds)`. The result will be an empty object.
 
 For more information, please read the [SDK Overview]({{< relref "_index.md" >}}), check out {{< ghlink href="sdks/nodejs/src/agonesSDK.js" >}}agonesSDK.js{{< /ghlink >}} and also look at the {{< ghlink href="examples/nodejs-simple" >}}Node.js example{{< / >}}.

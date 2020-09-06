@@ -21,7 +21,7 @@ will not try to connect to anything, and will just send log messages to stdout a
 that you can see exactly what the SDK in your game server is doing, and can
 confirm everything works.
 
-To do this you will need to download {{% ghrelease file_prefix="agonessdk-server" link_test="false" %}}, and unzip it.
+To do this you will need to download {{% ghrelease file_prefix="agonessdk-server" %}}, and unzip it.
 You will find the executables for the SDK server, one for each type of operating system.
 
 - `sdk-server.windows.amd64.exe` - Windows
@@ -93,6 +93,6 @@ $ curl -X POST "http://localhost:9358/ready" -H "accept: application/json" -H "C
 $ curl -GET "http://localhost:9358/gameserver" -H "accept: application/json"
 {"object_meta":{"creation_timestamp":"-62135596800"},"spec":{"health":{}},"status":{"state":"Ready"}}
 $ curl -X PUT "http://localhost:9358/metadata/label" -H "accept: application/json" -H "Content-Type: application/json" -d "{ \"key\": \"foo\", \"value\": \"bar\"}"
-$ curl -GET "http://localhost:9358/gameserver" -H "accept: application/json"}"
+$ curl -GET "http://localhost:9358/gameserver" -H "accept: application/json"
 {"object_meta":{"creation_timestamp":"-62135596800","labels":{"agones.dev/sdk-foo":"bar"}},"spec":{"health":{}},"status":{"state":"Ready"}}
 ```

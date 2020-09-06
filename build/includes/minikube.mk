@@ -27,14 +27,13 @@
 # (defaults virtualbox for Linux and macOS, hyperv for windows) if you so desire.
 minikube-test-cluster: DOCKER_RUN_ARGS+=--network=host -v $(minikube_cert_mount)
 minikube-test-cluster: $(ensure-build-image) minikube-agones-profile
-	$(MINIKUBE) start --kubernetes-version v1.13.12 --vm-driver $(MINIKUBE_DRIVER)
+	$(MINIKUBE) start --kubernetes-version v1.16.13 --vm-driver $(MINIKUBE_DRIVER)
 	# wait until the master is up
 	until docker run --rm $(common_mounts) $(DOCKER_RUN_ARGS) $(build_tag) kubectl cluster-info; \
 		do \
 			echo "Waiting for cluster to start..."; \
 			sleep 1; \
 		done
-	$(MAKE) setup-test-cluster DOCKER_RUN_ARGS="$(DOCKER_RUN_ARGS)"
 	$(MAKE) minikube-post-start
 
 # switch to the agones cluster

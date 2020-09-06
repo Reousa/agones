@@ -91,7 +91,7 @@ func NewPortAllocator(minPort, maxPort int32,
 // Run sets up the current state of port allocations and
 // starts tracking Pod and Node changes
 func (pa *PortAllocator) Run(stop <-chan struct{}) error {
-	pa.logger.Info("Running")
+	pa.logger.Debug("Running")
 
 	if !cache.WaitForCacheSync(stop, pa.gameServerSynced, pa.nodeSynced) {
 		return errors.New("failed to wait for caches to sync")
@@ -106,7 +106,6 @@ func (pa *PortAllocator) Run(stop <-chan struct{}) error {
 }
 
 // Allocate assigns a port to the GameServer and returns it.
-// Return ErrPortNotFound if no port is allocatable
 func (pa *PortAllocator) Allocate(gs *agonesv1.GameServer) *agonesv1.GameServer {
 	pa.mutex.Lock()
 	defer pa.mutex.Unlock()
@@ -121,6 +120,9 @@ func (pa *PortAllocator) Allocate(gs *agonesv1.GameServer) *agonesv1.GameServer 
 	// Also the return gives an escape from the double loop
 	findOpenPorts := func(amount int) []pn {
 		var ports []pn
+		if amount <= 0 {
+			return ports
+		}
 		for _, n := range pa.portAllocations {
 			for p, taken := range n {
 				if !taken {
@@ -211,7 +213,7 @@ func (pa *PortAllocator) DeAllocate(gs *agonesv1.GameServer) {
 // make the HostPort available
 func (pa *PortAllocator) syncDeleteGameServer(object interface{}) {
 	if gs, ok := object.(*agonesv1.GameServer); ok {
-		pa.logger.WithField("gs", gs).Info("syncing deleted GameServer")
+		pa.logger.WithField("gs", gs).Debug("Syncing deleted GameServer")
 		pa.DeAllocate(gs)
 	}
 }
@@ -226,7 +228,7 @@ func (pa *PortAllocator) syncAll() error {
 	pa.mutex.Lock()
 	defer pa.mutex.Unlock()
 
-	pa.logger.Info("Resetting Port Allocation")
+	pa.logger.Debug("Resetting Port Allocation")
 
 	nodes, err := pa.nodeLister.List(labels.Everything())
 	if err != nil {

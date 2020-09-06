@@ -12,41 +12,59 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-provider "google-beta" {
-  version = "~> 2.10"
-  zone    = "${var.cluster["zone"]}"
-}
 
-provider "google" {
-  version = "~> 2.10"
+terraform {
+  required_version = ">= 0.12.6"
 }
 
 data "google_client_config" "default" {}
+
+# A list of all parameters used in interpolation var.cluster
+# Set values to default if not key was not set in original map
+locals {
+  project           = lookup(var.cluster, "project", "agones")
+  zone              = lookup(var.cluster, "zone", "us-west1-c")
+  name              = lookup(var.cluster, "name", "test-cluster")
+  machineType       = lookup(var.cluster, "machineType", "n1-standard-4")
+  initialNodeCount  = lookup(var.cluster, "initialNodeCount", "4")
+  network           = lookup(var.cluster, "network", "default")
+  subnetwork        = lookup(var.cluster, "subnetwork", "")
+  kubernetesVersion = lookup(var.cluster, "kubernetesVersion", "1.16")
+}
 
 # echo command used for debugging purpose
 # Run `terraform taint null_resource.test-setting-variables` before second execution
 resource "null_resource" "test-setting-variables" {
   provisioner "local-exec" {
-    command = "${"${format("echo Current variables set as following - name: %s, project: %s, machineType: %s, initialNodeCount: %s, zone: %s",
-      "${var.cluster["name"]}", "${var.cluster["project"]}",
-      "${var.cluster["machineType"]}", "${var.cluster["initialNodeCount"]}",
-    "${var.cluster["zone"]}")}"}"
-  }
+    command = <<EOT
+    ${format("echo Current variables set as following - name: %s, project: %s, machineType: %s, initialNodeCount: %s, network: %s, zone: %s",
+    local.name, local.project,
+    local.machineType, local.initialNodeCount, local.network,
+local.zone)}
+    EOT
 }
-resource "google_container_cluster" "primary" {
-  name     = "${var.cluster["name"]}"
-  location = "${var.cluster["zone"]}"
-  project  = "${var.cluster["project"]}"
-  provider = "google-beta"
+}
 
-  min_master_version = "1.13"
+resource "google_container_cluster" "primary" {
+  name       = local.name
+  location   = local.zone
+  project    = local.project
+  network    = local.network
+  subnetwork = local.subnetwork
+
+  min_master_version = local.kubernetesVersion
 
   node_pool {
     name       = "default"
-    node_count = "${var.cluster["initialNodeCount"]}"
+    node_count = local.initialNodeCount
+    version = local.kubernetesVersion
+
+    management {
+      auto_upgrade = false
+    }
 
     node_config {
-      machine_type = "${var.cluster["machineType"]}"
+      machine_type = local.machineType
 
       oauth_scopes = [
         "https://www.googleapis.com/auth/devstorage.read_only",
@@ -63,6 +81,11 @@ resource "google_container_cluster" "primary" {
   node_pool {
     name       = "agones-system"
     node_count = 1
+    version = local.kubernetesVersion
+
+    management {
+      auto_upgrade = false
+    }
 
     node_config {
       machine_type = "n1-standard-4"
@@ -90,6 +113,11 @@ resource "google_container_cluster" "primary" {
   node_pool {
     name       = "agones-metrics"
     node_count = 1
+    version = local.kubernetesVersion
+
+    management {
+      auto_upgrade = false
+    }
 
     node_config {
       machine_type = "n1-standard-4"
@@ -121,19 +149,13 @@ resource "google_container_cluster" "primary" {
 }
 
 resource "google_compute_firewall" "default" {
-  name    = "game-server-firewall-firewall-${var.cluster["name"]}"
-  project = "${var.cluster["project"]}"
-  network = "${google_compute_network.default.name}"
+  name    = length(var.firewallName) == 0 ? "game-server-firewall-${local.name}" : var.firewallName
+  project = local.project
+  network = local.network
 
   allow {
     protocol = "udp"
-    ports    = ["${var.ports}"]
+    ports    = [var.ports]
   }
-
-  source_tags = ["game-server"]
-}
-
-resource "google_compute_network" "default" {
-  project = "${var.cluster["project"]}"
-  name    = "agones-network-${var.cluster["name"]}"
+  target_tags = ["game-server"]
 }

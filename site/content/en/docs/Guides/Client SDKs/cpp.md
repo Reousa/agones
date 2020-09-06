@@ -64,7 +64,7 @@ grpc::Status status = sdk->Allocate();
 if (!status.ok()) { ... }
 ```
 
-To mark the game server as [reserved]({{< relref "_index.md#reserve-seconds" >}}), call
+To mark the game server as [reserved]({{< relref "_index.md#reserveseconds" >}}), call
 `sdk->Reserve(seconds)`. This will return a grpc::Status object, from which we can call `status.ok()` to determine
 if the function completed successfully.
 
@@ -86,7 +86,7 @@ grpc::Status status = sdk->Shutdown();
 if (!status.ok()) { ... }
 ```
 
-To [set a Label]({{< relref "_index.md#setlabel-key-value" >}}) on the backing `GameServer` call
+To [set a Label]({{< relref "_index.md#setlabelkey-value" >}}) on the backing `GameServer` call
 `sdk->SetLabel(key, value)`.
 This will return a grpc::Status object, from which we can call `status.ok()` to determine
 if the function completed successfully.
@@ -98,7 +98,7 @@ grpc::Status status = sdk->SetLabel("test-label", "test-value");
 if (!status.ok()) { ... }
 ```
 
-To [set an Annotation]({{< relref "_index.md#setannotation-key-value" >}}) on the backing `GameServer` call
+To [set an Annotation]({{< relref "_index.md#setannotationkey-value" >}}) on the backing `GameServer` call
 `sdk->SetAnnotation(key, value)`.
 This will return a grpc::Status object, from which we can call `status.ok()` to determine
 if the function completed successfully.
@@ -122,7 +122,7 @@ grpc::Status status = sdk->GameServer(&gameserver);
 if (!status.ok()) {...}
 ```
 
-To get [updates on the backing `GameServer`]({{< relref "_index.md#watchgameserver-function-gameserver" >}}) as they happen,
+To get [updates on the backing `GameServer`]({{< relref "_index.md#watchgameserverfunctiongameserver" >}}) as they happen,
 call `sdk->WatchGameServer([](const agones::dev::sdk::GameServer& gameserver){...})`.
 
 This will call the passed in `std::function`
@@ -154,21 +154,24 @@ CMake is used to build SDK for all supported platforms (Linux/Window/MacOS).
 * Git
 * C++14 compiler
 
-Agones SDK depends on [gRPC](https://github.com/grpc/grpc/blob/master/BUILDING.md). If CMake can't find gRPC with find_package(), it download and build gRPC.
-There are some extra prerequisites for OpenSSL on Windows, see [documentation](https://github.com/openssl/openssl/blob/master/NOTES.WIN):
+Agones SDK depends on [gRPC](https://github.com/grpc/grpc/blob/master/BUILDING.md). If CMake cannot find gRPC with find_package(), it downloads and builds gRPC.
+There are some extra prerequisites for OpenSSL on Windows, see [documentation](https://github.com/openssl/openssl/blob/OpenSSL_1_1_1-stable/NOTES.WIN):
+
 * Perl
 * NASM
 
-Note that OpenSSL is not used in Agones SDK, but it required to have full successfull build of gRPC.
+Note that OpenSSL is not used in Agones SDK, but it is required to have full successfull build of gRPC.
 
 ## Options
 Following options are available:
+
 - **AGONES_THIRDPARTY_INSTALL_PATH** (default is CMAKE_INSTALL_PREFIX) - installation path for Agones prerequisites (used only if gRPC and Protobuf are not found by find_package)
 - **AGONES_ZLIB_STATIC** (default is ON) - use static version of zlib for gRPC
 
 (Windows only):
-- **AGONES_BUILD_THIRDPARTY_DEBUG** (default is OFF) - build both debug and release versions of SDK's prerequisities. Option is not used if you already have built gRPC.
-- **AGONES_OPENSSL_CONFIG_STRING** (default is VC-WIN64A) - arguments to configure OpenSSL build ([documentation](https://github.com/openssl/openssl/blob/master/INSTALL)). Used only if OpenSSL and gRPC is built by Agones.
+
+- **AGONES_BUILD_THIRDPARTY_DEBUG** (default is OFF) - build both debug and release versions of SDK's prerequisites. Option is not used if you already have built gRPC.
+- **AGONES_OPENSSL_CONFIG_STRING** (default is VC-WIN64A) - arguments to configure OpenSSL build ([documentation](https://github.com/openssl/openssl/blob/OpenSSL_1_1_1-stable/INSTALL)). Used only if OpenSSL and gRPC is built by Agones.
 
 ## Linux / MacOS
 ```
@@ -203,4 +206,4 @@ If **AGONES_ZLIB_STATIC** is set to OFF, ensure that you have installed zlib. Fo
 
 ### Using SDK
 In CMake-based projects it's enough to specify a folder where SDK is installed with `CMAKE_PREFIX_PATH` and use `find_package(agones CONFIG REQUIRED)` command. For example: {{< ghlink href="examples/cpp-simple" >}}cpp-simple{{< / >}}.
-It maybe useful to disable some [protobuf warnings](https://github.com/protocolbuffers/protobuf/blob/master/cmake/README.md#notes-on-compiler-warnings) in your project.
+It may be useful to disable some [protobuf warnings](https://github.com/protocolbuffers/protobuf/blob/master/cmake/README.md#notes-on-compiler-warnings) in your project.

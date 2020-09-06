@@ -27,47 +27,40 @@ gcloud-init: ensure-build-config
 gcloud-test-cluster: GCP_CLUSTER_NODEPOOL_INITIALNODECOUNT ?= 4
 gcloud-test-cluster: GCP_CLUSTER_NODEPOOL_MACHINETYPE ?= n1-standard-4
 gcloud-test-cluster: $(ensure-build-image)
-	docker run --rm -it $(common_mounts) $(DOCKER_RUN_ARGS) $(build_tag) gcloud \
-		deployment-manager deployments create $(GCP_CLUSTER_NAME)  \
-		--properties cluster.zone:$(GCP_CLUSTER_ZONE),cluster.name:$(GCP_CLUSTER_NAME),cluster.nodePool.initialNodeCount:$(GCP_CLUSTER_NODEPOOL_INITIALNODECOUNT),cluster.nodePool.machineType:$(GCP_CLUSTER_NODEPOOL_MACHINETYPE)\
-		--template=$(mount_path)/build/gke-test-cluster/cluster.yml.jinja
+	$(MAKE) gcloud-terraform-cluster GCP_TF_CLUSTER_NAME="$(GCP_CLUSTER_NAME)" GCP_CLUSTER_ZONE="$(GCP_CLUSTER_ZONE)" \
+		GCP_CLUSTER_NODEPOOL_INITIALNODECOUNT="$(GCP_CLUSTER_NODEPOOL_INITIALNODECOUNT)" GCP_CLUSTER_NODEPOOL_MACHINETYPE="$(GCP_CLUSTER_NODEPOOL_MACHINETYPE)"
 	$(MAKE) gcloud-auth-cluster
-	$(MAKE) setup-test-cluster
 
 clean-gcloud-test-cluster: $(ensure-build-image)
-	docker run --rm -it $(common_mounts) $(DOCKER_RUN_ARGS) $(build_tag) gcloud \
-		deployment-manager deployments delete $(GCP_CLUSTER_NAME)
+	$(MAKE) gcloud-terraform-destroy-cluster
 
 # Creates a gcloud cluster for end-to-end
 # it installs also a consul cluster to handle build system concurrency using a distributed lock
+gcloud-e2e-test-cluster: GCP_PROJECT ?= $(current_project)
 gcloud-e2e-test-cluster: $(ensure-build-image)
-	docker run --rm -it $(common_mounts) $(DOCKER_RUN_ARGS) $(build_tag) gcloud \
-		deployment-manager deployments create e2e-test-cluster \
-		--config=$(mount_path)/build/gke-test-cluster/cluster-e2e.yml
-	$(MAKE) gcloud-auth-cluster GCP_CLUSTER_NAME=e2e-test-cluster GCP_CLUSTER_ZONE=us-west1-c
-	docker run --rm $(common_mounts) $(DOCKER_RUN_ARGS) $(build_tag) \
-		kubectl apply -f $(mount_path)/build/helm.yaml
-	docker run --rm $(common_mounts) $(DOCKER_RUN_ARGS) $(build_tag) \
-		helm init --service-account helm --wait
-	docker run --rm $(common_mounts) $(DOCKER_RUN_ARGS) $(build_tag) \
-		helm install --wait --set Replicas=1,uiService.type=ClusterIP --name consul stable/consul
+gcloud-e2e-test-cluster:
+	$(MAKE) terraform-init DIRECTORY=e2e
+	docker run --rm -it $(common_mounts) $(DOCKER_RUN_ARGS) $(build_tag) bash -c 'cd $(mount_path)/build/terraform/e2e && \
+      	terraform apply -auto-approve -var project="$(GCP_PROJECT)"'
 
 # Deletes the gcloud e2e cluster and cleanup any left pvc volumes
 clean-gcloud-e2e-test-cluster: $(ensure-build-image)
-	-docker run --rm $(common_mounts) $(DOCKER_RUN_ARGS) $(build_tag) \
-		helm delete --purge consul && kubectl delete pvc -l component=consul-consul
-	$(MAKE) clean-gcloud-test-cluster GCP_CLUSTER_NAME=e2e-test-cluster
+clean-gcloud-e2e-test-cluster:
+	$(MAKE) terraform-init DIRECTORY=e2e
+	$(DOCKER_RUN) bash -c 'cd $(mount_path)/build/terraform/e2e && terraform destroy -var project=$(GCP_PROJECT) -auto-approve'
 
 # Creates a gcloud cluster for prow
+gcloud-prow-build-cluster: GCP_PROJECT ?= $(current_project)
 gcloud-prow-build-cluster: $(ensure-build-image)
-	docker run --rm -it $(common_mounts) $(DOCKER_RUN_ARGS) $(build_tag) gcloud \
-		deployment-manager deployments create prow-build-cluster \
-		--config=$(mount_path)/build/gke-test-cluster/cluster-prow.yml
-	$(MAKE) gcloud-auth-cluster GCP_CLUSTER_NAME=prow-build-cluster GCP_CLUSTER_ZONE=us-west1-c
+gcloud-prow-build-cluster:
+	$(MAKE) terraform-init DIRECTORY=prow
+	docker run --rm -it $(common_mounts) $(DOCKER_RUN_ARGS) $(build_tag) bash -c 'cd $(mount_path)/build/terraform/prow && \
+      	terraform apply -auto-approve -var project="$(GCP_PROJECT)"'
 
 # Deletes the gcloud prow build cluster
 clean-gcloud-prow-build-cluster: $(ensure-build-image)
-	$(MAKE) clean-gcloud-test-cluster GCP_CLUSTER_NAME=prow-build-cluster
+	$(MAKE) terraform-init DIRECTORY=prow
+	$(DOCKER_RUN) bash -c 'cd $(mount_path)/build/terraform/prow && terraform destroy -var project=$(GCP_PROJECT) -auto-approve'
 
 # Pulls down authentication information for kubectl against a cluster, name can be specified through GCP_CLUSTER_NAME
 # (defaults to 'test-cluster')
